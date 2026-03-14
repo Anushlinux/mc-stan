@@ -9,7 +9,7 @@ This project is licensed under the [MIT License](LICENSE), so your contributions
 ### Prerequisites
 
 - [Node.js](https://nodejs.org/) (v22 recommended)
-- [VS Code](https://code.visualstudio.com/) (v1.107.0 or later)
+- [VS Code](https://code.visualstudio.com/) (v1.105.0 or later)
 
 ### Setup
 
