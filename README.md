@@ -1,174 +1,204 @@
-<h1 align="center">
-    <a href="https://github.com/pablodelucca/pixel-agents/discussions">
-        <img src="webview-ui/public/banner.png" alt="Pixel Agents">
-    </a>
-</h1>
+# Pixel Agents for Codex
 
-<h2 align="center" style="padding-bottom: 20px;">
-  The game interface where AI agents build real things
-</h2>
+- Fork publishers: Rajdeep Pandey and Anushrut Pandit
+- Original upstream repository: https://github.com/pablodelucca/pixel-agents
 
-<div align="center" style="margin-top: 25px;">
+## Fork Notice
 
-[![version](https://img.shields.io/endpoint?url=https%3A%2F%2Fgist.githubusercontent.com%2Fpablodelucca%2F3cd28398fa4a2c0a636e1d51d41aee39%2Fraw%2Fversion.json)](https://github.com/pablodelucca/pixel-agents/releases)
-[![marketplaces](https://img.shields.io/endpoint?url=https%3A%2F%2Fgist.githubusercontent.com%2Fpablodelucca%2F3cd28398fa4a2c0a636e1d51d41aee39%2Fraw%2Finstalls.json)](https://marketplace.visualstudio.com/items?itemName=pablodelucca.pixel-agents)
-[![stars](https://img.shields.io/github/stars/pablodelucca/pixel-agents?logo=github&color=0183ff&style=flat)](https://github.com/pablodelucca/pixel-agents/stargazers)
-[![license](https://img.shields.io/github/license/pablodelucca/pixel-agents?color=0183ff&style=flat)](https://github.com/pablodelucca/pixel-agents/blob/main/LICENSE)
-[![good first issues](https://img.shields.io/github/issues/pablodelucca/pixel-agents/good%20first%20issue?color=7057ff&label=good%20first%20issues)](https://github.com/pablodelucca/pixel-agents/issues?q=is%3Aopen+is%3Aissue+label%3A%22good+first+issue%22)
+This codebase was forked from Pablo Delucca's Pixel Agents using GitHub's fork feature, and this README explicitly labels that origin.
 
-</div>
+The original project was built around Claude Code. This fork keeps the pixel office UX, but changes the live extension behavior to work with Codex-first workflows inside VS Code.
 
-<div align="center">
-<a href="https://marketplace.visualstudio.com/items?itemName=pablodelucca.pixel-agents">🛒 VS Code Marketplace</a> • <a href="https://github.com/pablodelucca/pixel-agents/discussions">💬 Discussions</a> • <a href="https://github.com/pablodelucca/pixel-agents/issues">🐛 Issues</a> • <a href="CONTRIBUTING.md">🤝 Contributing</a> • <a href="CHANGELOG.md">📋 Changelog</a>
-</div>
+This is not a claim that the original project was designed for Codex. The Codex runtime, session handling, hook installation, Mission Control state model, and master orchestration flow described below are the main additions and retargeting work in this fork.
 
-<br/>
+## What This Fork Does
 
-Pixel Agents turns multi-agent AI systems into something you can actually see and manage. Each agent becomes a character in a pixel art office. They walk around, sit at their desk, and visually reflect what they are doing — typing when writing code, reading when searching files, waiting when it needs your attention.
+Pixel Agents for Codex turns Codex sessions into visible characters inside a pixel-art VS Code panel.
 
-Right now it works as a VS Code extension with Claude Code. The vision though, is a fully agent-agnostic, platform-agnostic interface for orchestrating any AI agents, deployable anywhere.
+In the live code today:
 
-This is the source code for the free Pixel Agents extension for VS Code — install from the [VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=pablodelucca.pixel-agents) or [Open VSX](https://open-vsx.org/extension/pablodelucca/pixel-agents) with the full furniture catalog included.
+- Each visible agent maps to a stateful Codex session.
+- Managed agents launch with the `codex` CLI.
+- Session state is tracked through a local hook server plus Mission Control state persisted in the extension workspace.
+- The extension can monitor approvals, waiting states, tool activity, token usage, artifacts, and task ownership.
+- A master orchestrator can take one operator brief, split it into a fixed 3-worker plan, create isolated git worktrees, launch 3 worker Codex sessions, and guide review/apply back into the main checkout.
 
-![Pixel Agents screenshot](webview-ui/public/Screenshot.jpg)
+## What Changed From Upstream
 
-## Features
+The upstream repo was Claude-first. This fork is Codex-first in the live launch path:
 
-- **One agent, one character** — every Claude Code terminal gets its own animated character
-- **Live activity tracking** — characters animate based on what the agent is actually doing (writing, reading, running commands)
-- **Office layout editor** — design your office with floors, walls, and furniture using a built-in editor
-- **Speech bubbles** — visual indicators when an agent is waiting for input or needs permission
-- **Sound notifications** — optional chime when an agent finishes its turn
-- **Sub-agent visualization** — Task tool sub-agents spawn as separate characters linked to their parent
-- **Persistent layouts** — your office design is saved and shared across VS Code windows
-- **External asset directories** — load custom or third-party furniture packs from any folder on your machine
-- **Diverse characters** — 6 diverse characters. These are based on the amazing work of [JIK-A-4, Metro City](https://jik-a-4.itch.io/metrocity-free-topdown-character-pack).
+- Agent launch uses `codex` and optional `--dangerously-bypass-approvals-and-sandbox`.
+- Project/session discovery is rooted in `~/.codex/projects/...`.
+- Hook installation targets `~/.codex/settings.json`.
+- The bundled hook script is copied to `~/.pixel-agents/hooks/codex-hook.js`.
+- Hook events are delivered to a local HTTP server inside the extension and routed into session state.
+- Mission Control persists structured state for sessions, tasks, approvals, artifacts, workspaces, briefings, and orchestration progress.
+- The master agent flow is no longer just visual language. It is implemented as a real orchestrator that provisions worktrees and launches worker Codex sessions.
 
-<p align="center">
-  <img src="webview-ui/public/characters.png" alt="Pixel Agents characters" width="320" height="72" style="image-rendering: pixelated;">
-</p>
+## Core Features
+
+- Stateful Codex agents: every managed character is backed by a real Codex session with its own session id, cwd, project/worktree mapping, and live lifecycle state.
+- Pixel office visualization: agents move, animate, and show active, waiting, blocked, and approval-related states in the webview.
+- Mission Control: the extension stores structured snapshots for sessions, tasks, approvals, events, artifacts, token usage, workspaces, and orchestrator progress.
+- Sub-agent visibility: subtask and agent delegation events are surfaced in the office as linked child activity.
+- Interactive session monitoring: managed sessions use the embedded/native terminal bridge so the extension can inspect and interact with running Codex terminals.
+- Approval tracking: permission requests are classified by scope and risk and surfaced through Mission Control.
+- Externalized office customization: layouts, floors, walls, furniture, and external asset directories remain part of the experience.
+- Master orchestration: one top-level brief can be planned, split, launched, reviewed, and applied across three isolated worker sessions.
+
+## How The Codex Runtime Works
+
+The current flow in this fork is:
+
+1. The VS Code extension starts a local HTTP hook server on `127.0.0.1` and writes discovery info to `~/.pixel-agents/server.json`.
+2. If hooks are enabled, the extension installs Codex hook entries into `~/.codex/settings.json` and copies the hook script into `~/.pixel-agents/hooks/codex-hook.js`.
+3. When you create an agent, the extension creates a managed agent record first, including cwd, project directory, orchestration metadata, and empty session binding.
+4. The extension launches `codex` in a managed terminal session.
+5. When Codex emits `SessionStart`, the hook event handler claims the pending agent by cwd, binds the real `session_id`, and starts live tracking.
+6. Tool, approval, notification, stop, subagent, and session-end hook events are forwarded to both the office UI and Mission Control.
+7. Mission Control persists the structured session snapshot in workspace state so the extension keeps long-lived context for tasks and reviews.
+
+## Why "Each Agent Is Stateful" In This Fork
+
+That claim is backed by the implementation, not just the UI.
+
+Each session tracked in Mission Control carries structured state such as:
+
+- provider
+- session id
+- agent id
+- cwd and project/worktree location
+- current status
+- current and last tool
+- blocker reason
+- approval count
+- artifact count
+- token usage
+- linked task and workspace assignment
+
+Mission Control also keeps:
+
+- task records
+- approval requests and decisions
+- event timelines
+- produced artifacts
+- worktree assignments
+- orchestrator plans and progress
+- active session lookup by agent id
+
+So these are not stateless animated sprites. They are persistent tracked Codex sessions with attached operational state.
+
+## Master Agent / Master Orchestrator
+
+This fork includes a real master orchestration flow.
+
+Important implementation detail: the master does not directly code. It plans and coordinates. The current implementation fans work out into a fixed 3-worker split.
+
+The master flow works like this:
+
+1. The operator enters a high-level prompt in the Master Orchestrator panel.
+2. The extension resolves the repository root and active branch.
+3. The repo must have a clean tracked working tree before orchestration starts.
+4. The local planner analyzes the repository layout and produces exactly 3 non-overlapping worker assignments.
+5. Each worker gets owned paths, acceptance criteria, coordination notes, and a dedicated git worktree.
+6. Worktrees are provisioned under `~/.pixel-agents/worktrees/<repo>/<run>/agent-1..3`.
+7. The extension launches Worker 1, Worker 2, and Worker 3 as separate Codex sessions with assignment-specific prompts.
+8. Mission Control tracks the full run, including phase progress, worker tasks, workspace assignments, and when the team becomes quiescent.
+9. The UI can load a review for one worker or a combined team review by diffing each worker worktree against the main checkout.
+10. Approved worker changes can be applied back into the main checkout from the review UI.
+
+So the "master chief agent" in this fork is best described as a master orchestrator that takes a task, plans a 3-way split, spawns multiple Codex sessions, and makes session management and review easier.
+
+## Mission Control
+
+Mission Control is the operational layer behind the office.
+
+It tracks:
+
+- sessions and lifecycle state
+- tasks and ownership
+- pending approvals
+- artifacts such as files, commands, delegations, and summaries
+- event history
+- workspace assignments
+- briefing metadata
+- orchestrator phases and progress
+
+This lets the extension surface:
+
+- who is active
+- who is blocked
+- who needs approval
+- what changed
+- which workspace or worktree belongs to which worker
+- when the full team is ready for review
+
+## Review And Apply Flow
+
+The master workflow is not only about spawning workers. It also includes controlled integration:
+
+- Worker review loads a diff only for that worker's owned paths.
+- Team review aggregates all worker worktree diffs.
+- Approve And Apply copies reviewed worker changes from the isolated worktree back into the main checkout.
+- The main checkout must stay clean in tracked owned paths before apply.
+
+This keeps the split explicit and makes the handoff back to the main repo understandable.
+
+## UI Highlights
+
+- Pixel office canvas with animated agents
+- Mission Control modal for overview, dispatch, master orchestration, and agent inspection
+- Master Agent launcher in the office UI
+- Worker review and team review modals
+- Embedded/native terminal inspection for managed sessions
+- Layout editor and asset loading for the office environment
 
 ## Requirements
 
 - VS Code 1.105.0 or later
-- [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) installed and configured
-- **Platform**: Windows, Linux, and macOS are supported
+- Codex CLI installed and configured
+- Git available locally
+- Node.js and npm for building from source
 
 ## Getting Started
 
-If you just want to use Pixel Agents, the easiest way is to download the [VS Code extension](https://marketplace.visualstudio.com/items?itemName=pablodelucca.pixel-agents). If you want to play with the code, develop, or contribute, then:
-
-### Install from source
-
 ```bash
-git clone https://github.com/pablodelucca/pixel-agents.git
-cd pixel-agents
+git clone https://github.com/<your-account>/mc-stan.git
+cd mc-stan
 npm install
 cd webview-ui && npm install && cd ..
+cd server && npm install && cd ..
 npm run build
 ```
 
-Then press **F5** in VS Code to launch the Extension Development Host.
+Then press `F5` in VS Code to launch the Extension Development Host.
 
-### Usage
+## Using The Extension
 
-1. Open the **Pixel Agents** panel (it appears in the bottom panel area alongside your terminal)
-2. Click **+ Agent** to spawn a new Claude Code terminal and its character. Right-click for the option to launch with `--dangerously-skip-permissions` (bypasses all tool approval prompts)
-3. Start coding with Claude — watch the character react in real time
-4. Click a character to select it, then click a seat to reassign it
-5. Click **Layout** to open the office editor and customize your space
+1. Open the Pixel Agents panel in VS Code.
+2. Create an agent to launch a managed Codex session.
+3. Watch the character reflect live activity and hook-driven status changes.
+4. Open Mission Control to inspect tasks, approvals, and session state.
+5. Use the Master Agent to brief the orchestrator and launch the 3-worker Codex run.
+6. Review worker diffs or the combined team review before applying changes back to the main checkout.
 
-## Layout Editor
+## Current Positioning
 
-The built-in editor lets you design your office:
+This fork should be understood as:
 
-- **Floor** — Full HSB color control
-- **Walls** — Auto-tiling walls with color customization
-- **Tools** — Select, paint, erase, place, eyedropper, pick
-- **Undo/Redo** — 50 levels with Ctrl+Z / Ctrl+Y
-- **Export/Import** — Share layouts as JSON files via the Settings modal
+- a clearly labeled GitHub fork of the original Pixel Agents project
+- a Codex-adapted version of that idea
+- a VS Code extension that visualizes and manages stateful Codex sessions
+- a hackathon fork with added master/worker orchestration and review flow
 
-The grid is expandable up to 64×64 tiles. Click the ghost border outside the current grid to grow it.
+It should not be described as the original upstream project, and it should not be described as if Codex support was the original design target. That is exactly what this fork changes.
 
-### Office Assets
+## Acknowledgements
 
-All office assets (furniture, floors, walls) are now **fully open-source** and included in this repository under `webview-ui/public/assets/`. No external purchases or imports are needed — everything works out of the box.
-
-Each furniture item lives in its own folder under `assets/furniture/` with a `manifest.json` that declares its sprites, rotation groups, state groups (on/off), and animation frames. Floor tiles are individual PNGs in `assets/floors/`, and wall tile sets are in `assets/walls/`. This modular structure makes it easy to add, remove, or modify assets without touching any code.
-
-To add a new furniture item, create a folder in `webview-ui/public/assets/furniture/` with your PNG sprite(s) and a `manifest.json`, then rebuild. The asset manager (`scripts/asset-manager.html`) provides a visual editor for creating and editing manifests.
-
-To use furniture from an external directory, open Settings → **Add Asset Directory**. See [docs/external-assets.md](docs/external-assets.md) for the full manifest format and how to use third-party asset packs.
-
-Characters are based on the amazing work of [JIK-A-4, Metro City](https://jik-a-4.itch.io/metrocity-free-topdown-character-pack).
-
-## How It Works
-
-Pixel Agents watches Claude Code's JSONL transcript files to track what each agent is doing. When an agent uses a tool (like writing a file or running a command), the extension detects it and updates the character's animation accordingly. No modifications to Claude Code are needed — it's purely observational.
-
-The webview runs a lightweight game loop with canvas rendering, BFS pathfinding, and a character state machine (idle → walk → type/read). Everything is pixel-perfect at integer zoom levels.
-
-## Tech Stack
-
-- **Extension**: TypeScript, VS Code Webview API, esbuild
-- **Webview**: React 19, TypeScript, Vite, Canvas 2D
-
-## Known Limitations
-
-- **Agent-terminal sync** — the way agents are connected to Claude Code terminal instances is not super robust and sometimes desyncs, especially when terminals are rapidly opened/closed or restored across sessions.
-- **Heuristic-based status detection** — Claude Code's JSONL transcript format does not provide clear signals for when an agent is waiting for user input or when it has finished its turn. The current detection is based on heuristics (idle timers, turn-duration events) and often misfires — agents may briefly show the wrong status or miss transitions.
-- **Linux/macOS tip** — if you launch VS Code without a folder open (e.g. bare `code` command), agents will start in your home directory. This is fully supported; just be aware your Claude sessions will be tracked under `~/.claude/projects/` using your home directory as the project root.
-
-## Troubleshooting
-
-If your agent appears stuck on idle or doesn't spawn:
-
-1. **Debug View** — In the Pixel Agents panel, click the gear icon (Settings), then toggle **Debug View**. This shows connection diagnostics per agent: JSONL file status, lines parsed, last data timestamp, and file path. If you see "JSONL not found", the extension can't locate the session file.
-2. **Debug Console** — If you're running from source (Extension Development Host via F5), open VS Code's **View > Debug Console**. Search for `[Pixel Agents]` to see detailed logs: project directory resolution, JSONL polling status, path encoding mismatches, and unrecognized JSONL record types.
-
-## Where This Is Going
-
-The long-term vision is an interface where managing AI agents feels like playing the Sims, but the results are real things built.
-
-- **Agents as characters** you can see, assign, monitor, and redirect, each with visible roles (designer, coder, writer, reviewer), stats, context usage, and tools.
-- **Desks as directories** — drag an agent to a desk to assign it to a project or working directory.
-- **An office as a project** — with a Kanban board on the wall where idle agents can pick up tasks autonomously.
-- **Deep inspection** — click any agent to see its model, branch, system prompt, and full work history. Interrupt it, chat with it, or redirect it.
-- **Token health bars** — rate limits and context windows visualized as in-game stats.
-- **Fully customizable** — upload your own character sprites, themes, and office assets. Eventually maybe even move beyond pixel art into 3D or VR.
-
-For this to work, the architecture needs to be modular at every level:
-
-- **Platform-agnostic**: VS Code extension today, Electron app, web app, or any other host environment tomorrow.
-- **Agent-agnostic**: Claude Code today, but built to support Codex, OpenCode, Gemini, Cursor, Copilot, and others through composable adapters.
-- **Theme-agnostic**: community-created assets, skins, and themes from any contributor.
-
-We're actively working on the core module and adapter architecture that makes this possible. If you're interested to talk about this further, please visit our [Discussions Section](https://github.com/pablodelucca/pixel-agents/discussions).
-
-
-## Community & Contributing
-
-Use **[Issues](https://github.com/pablodelucca/pixel-agents/issues)** to report bugs or request features. Join **[Discussions](https://github.com/pablodelucca/pixel-agents/discussions)** for questions and conversations.
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for instructions on how to contribute.
-
-Please read our [Code of Conduct](CODE_OF_CONDUCT.md) before participating.
-
-## Supporting the Project
-
-If you find Pixel Agents useful, consider supporting its development:
-
-<a href="https://github.com/sponsors/pablodelucca">
-  <img src="https://img.shields.io/badge/Sponsor-GitHub-ea4aaa?logo=github" alt="GitHub Sponsors">
-</a>
-<a href="https://ko-fi.com/pablodelucca">
-  <img src="https://img.shields.io/badge/Support-Ko--fi-ff5e5b?logo=ko-fi" alt="Ko-fi">
-</a>
-
-## Star History
-
-[![Star History Chart](https://api.star-history.com/svg?repos=pablodelucca/pixel-agents&type=Date)](https://www.star-history.com/?repos=pablodelucca%2Fpixel-agents&type=date&legend=bottom-right)
+- Original project and concept: Pablo Delucca, Pixel Agents
+- Original upstream repo: https://github.com/pablodelucca/pixel-agents
+- Character art attribution retained from upstream: JIK-A-4, Metro City
 
 ## License
 
-This project is licensed under the [MIT License](LICENSE).
+This repository inherits the upstream MIT License. See [LICENSE](LICENSE).
