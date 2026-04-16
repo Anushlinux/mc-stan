@@ -57,12 +57,18 @@ export function EmbeddedTerminalPane({
     if (!container) return;
 
     const xterm = new Terminal({
-      allowTransparency: true,
+      allowTransparency: false,
       convertEol: false,
       cursorBlink: true,
       cursorStyle: 'block',
-      fontFamily: '"FS Pixel Sans", monospace',
+      fontFamily:
+        '"Monaco", Menlo, "SF Mono", "Cascadia Mono", Consolas, "Liberation Mono", monospace',
       fontSize: 14,
+      fontWeight: 400,
+      fontWeightBold: 700,
+      lineHeight: 1,
+      letterSpacing: 0,
+      rescaleOverlappingGlyphs: true,
       rows: 32,
       cols: 120,
       scrollback: 1000,
@@ -93,7 +99,6 @@ export function EmbeddedTerminalPane({
     xterm.loadAddon(fitAddon);
     xterm.open(container);
     xterm.options.disableStdin = !(terminalStateRef.current?.canInteract ?? false);
-    fitAddon.fit();
     xtermRef.current = xterm;
     fitAddonRef.current = fitAddon;
 
@@ -104,8 +109,14 @@ export function EmbeddedTerminalPane({
       lastBufferRef.current = '';
     }
 
-    const pushSize = () => {
+    const reflowTerminal = () => {
       fitAddon.fit();
+      xterm.clearTextureAtlas();
+      xterm.refresh(0, Math.max(0, xterm.rows - 1));
+    };
+
+    const pushSize = () => {
+      reflowTerminal();
       vscode.postMessage({
         type: 'terminalResize',
         agentId,
@@ -121,6 +132,16 @@ export function EmbeddedTerminalPane({
     resizeObserver.observe(container);
     pushSize();
 
+    const fontsReady = document.fonts?.ready;
+    let disposed = false;
+
+    if (fontsReady) {
+      void fontsReady.then(() => {
+        if (disposed || xtermRef.current !== xterm) return;
+        pushSize();
+      });
+    }
+
     const dataDisposable = xterm.onData((data) => {
       if (!terminalStateRef.current?.canInteract) return;
       vscode.postMessage({
@@ -131,6 +152,7 @@ export function EmbeddedTerminalPane({
     });
 
     return () => {
+      disposed = true;
       dataDisposable.dispose();
       resizeObserver.disconnect();
       fitAddonRef.current = null;

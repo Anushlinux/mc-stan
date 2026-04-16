@@ -12,6 +12,7 @@ interface BottomToolbarProps {
   isSettingsOpen: boolean;
   onToggleSettings: () => void;
   workspaceFolders: WorkspaceFolder[];
+  projectDirectories: WorkspaceFolder[];
   isMissionControlOpen: boolean;
   onToggleMissionControl: () => void;
 }
@@ -23,6 +24,7 @@ export function BottomToolbar({
   isSettingsOpen,
   onToggleSettings,
   workspaceFolders,
+  projectDirectories,
   isMissionControlOpen,
   onToggleMissionControl,
 }: BottomToolbarProps) {
@@ -43,15 +45,19 @@ export function BottomToolbar({
     return () => document.removeEventListener('mousedown', handleClick);
   }, [isFolderPickerOpen, isBypassMenuOpen]);
 
-  const hasMultipleFolders = workspaceFolders.length > 1;
+  const workDirectories = [...workspaceFolders, ...projectDirectories].filter(
+    (folder, index, list) =>
+      list.findIndex((candidate) => candidate.path === folder.path) === index,
+  );
+  const hasMultipleFolders = workDirectories.length > 1;
 
   const handleAgentClick = () => {
     setIsBypassMenuOpen(false);
     pendingBypassRef.current = false;
     if (hasMultipleFolders) {
       setIsFolderPickerOpen((v) => !v);
-    } else if (workspaceFolders.length === 1) {
-      vscode.postMessage({ type: 'openCodex', folderPath: workspaceFolders[0].path });
+    } else if (workDirectories.length === 1) {
+      vscode.postMessage({ type: 'openCodex', folderPath: workDirectories[0].path });
     } else {
       onOpenCodex();
     }
@@ -81,10 +87,10 @@ export function BottomToolbar({
     if (hasMultipleFolders) {
       pendingBypassRef.current = bypassPermissions;
       setIsFolderPickerOpen(true);
-    } else if (workspaceFolders.length === 1) {
+    } else if (workDirectories.length === 1) {
       vscode.postMessage({
         type: 'openCodex',
-        folderPath: workspaceFolders[0].path,
+        folderPath: workDirectories[0].path,
         bypassPermissions,
       });
     } else {
@@ -117,13 +123,16 @@ export function BottomToolbar({
           </DropdownItem>
         </Dropdown>
         <Dropdown isOpen={isFolderPickerOpen} className="min-w-128">
-          {workspaceFolders.map((folder) => (
+          {workDirectories.map((folder) => (
             <DropdownItem
               key={folder.path}
               onClick={() => handleFolderSelect(folder)}
               className="text-base"
             >
               {folder.name}
+              <span className="ml-4 text-2xs text-text-muted">
+                {folder.source === 'project' ? 'Added directory' : 'Workspace'}
+              </span>
             </DropdownItem>
           ))}
         </Dropdown>

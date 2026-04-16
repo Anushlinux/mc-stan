@@ -88,11 +88,11 @@ The project uses a pixel art aesthetic. All overlays should use:
 
 These conventions are enforced by custom ESLint rules (`eslint-rules/pixel-agents-rules.mjs`):
 
-| Rule               | Scope               | What it checks                                              |
-| ------------------ | ------------------- | ----------------------------------------------------------- |
-| `no-inline-colors` | Extension + Webview | No hex/rgb/rgba/hsl/hsla literals outside `constants.ts`    |
-| `pixel-shadow`     | Webview only        | Box shadows must use `var(--pixel-shadow)` or `2px 2px 0px` |
-| `pixel-font`       | Webview only        | Font family must reference FS Pixel Sans                    |
+| Rule               | Scope               | What it checks                                                                              |
+| ------------------ | ------------------- | ------------------------------------------------------------------------------------------- |
+| `no-inline-colors` | Extension + Webview | No hex/rgb/rgba/hsl/hsla literals outside `constants.ts`                                    |
+| `pixel-shadow`     | Webview only        | Box shadows must use `var(--pixel-shadow)` or `2px 2px 0px`                                 |
+| `pixel-font`       | Webview only        | UI font family must reference FS Pixel Sans; xterm terminal configs may use monospace fonts |
 
 These rules are set to `error` and will block your PR if violated.
 

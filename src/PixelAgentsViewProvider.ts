@@ -14,6 +14,7 @@ import { PixelAgentsServer } from '../server/src/server.js';
 import type { EmbeddedTerminalSnapshot } from '../shared/embeddedTerminal.js';
 import type { MissionControlTask } from '../shared/missionControl.js';
 import {
+  type CreateManagedAgentOptions,
   getProjectDirPath,
   launchNewTerminal,
   persistAgents,
@@ -40,6 +41,7 @@ import {
 } from './assetLoader.js';
 import { readConfig, writeConfig } from './configPersistence.js';
 import {
+  COMMAND_SHOW_PANEL,
   GLOBAL_KEY_ALWAYS_SHOW_LABELS,
   GLOBAL_KEY_HOOKS_ENABLED,
   GLOBAL_KEY_HOOKS_INFO_SHOWN,
@@ -56,10 +58,26 @@ import {
 } from './embeddedTerminalManager.js';
 import type { LayoutWatcher } from './layoutPersistence.js';
 import { readLayoutFromFile, watchLayoutFile, writeLayoutToFile } from './layoutPersistence.js';
-import { MissionControlStore } from './missionControlStore.js';
+import { MasterOrchestrator, type MasterPlannerAssignment } from './masterOrchestrator.js';
+import { type CreateTaskOptions, MissionControlStore } from './missionControlStore.js';
 import { NativeTerminalManager } from './nativeTerminalManager.js';
 import { safeUpdateState } from './stateUtils.js';
 import type { AgentState } from './types.js';
+import { VoiceDictationManager } from './voiceDictationManager.js';
+import { WorktreeManager, type WorktreeReview } from './worktreeManager.js';
+
+interface CreateAgentSessionOptions extends CreateManagedAgentOptions {
+  bypassPermissions?: boolean;
+  taskInput?: {
+    title?: string;
+    goal: string;
+    priority?: MissionControlTask['priority'];
+    acceptanceCriteria?: string[];
+    constraints?: string[];
+    expectedArtifacts?: string[];
+  };
+  taskOptions?: CreateTaskOptions;
+}
 
 export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
   nextAgentId = { current: 1 };
@@ -82,9 +100,14 @@ export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
   private pixelAgentsServer: PixelAgentsServer | null = null;
   private hookEventHandler: HookEventHandler | null = null;
   private embeddedTerminalManager: EmbeddedTerminalManager;
+  private masterOrchestrator: MasterOrchestrator;
   private nativeTerminalManager: NativeTerminalManager;
   private missionControlStore: MissionControlStore;
   private missionControlUnsubscribe: (() => void) | null = null;
+  private voiceDictationManager: VoiceDictationManager;
+  private worktreeManager: WorktreeManager;
+  private webviewReady = false;
+  private pendingVoiceDictationToggle = false;
 
   constructor(private readonly context: vscode.ExtensionContext) {
     this.embeddedTerminalManager = new EmbeddedTerminalManager({
@@ -129,9 +152,17 @@ export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
       },
     });
     this.missionControlStore = new MissionControlStore(context);
+    this.masterOrchestrator = new MasterOrchestrator();
     this.missionControlUnsubscribe = this.missionControlStore.subscribe((snapshot) => {
       this.webview?.postMessage({ type: 'missionControlSnapshot', snapshot });
     });
+    this.voiceDictationManager = new VoiceDictationManager({
+      extensionPath: context.extensionPath,
+      onText: async (text) => {
+        await this.insertVoiceDictationText(text);
+      },
+    });
+    this.worktreeManager = new WorktreeManager();
     this.initHooks();
   }
 
@@ -338,14 +369,27 @@ export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
+  private buildAgentLaunchArgs(agent: AgentState, bypassPermissions = false): string[] {
+    const args: string[] = [];
+    if (bypassPermissions) {
+      args.push('--dangerously-bypass-approvals-and-sandbox');
+    }
+    if (agent.initialPrompt?.trim()) {
+      args.push(agent.initialPrompt.trim());
+    }
+    return args;
+  }
+
   private launchNativeAgentRuntime(agent: AgentState, bypassPermissions = false): void {
     try {
       const { terminal, snapshot } = this.nativeTerminalManager.launchSession({
         agentId: agent.id,
         cwd: agent.cwd ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? os.homedir(),
-        name: `${TERMINAL_NAME_PREFIX} #${agent.id}`,
+        name: agent.displayName
+          ? `${TERMINAL_NAME_PREFIX} #${agent.id} · ${agent.displayName}`
+          : `${TERMINAL_NAME_PREFIX} #${agent.id}`,
         command: 'codex',
-        args: bypassPermissions ? ['--dangerously-bypass-approvals-and-sandbox'] : [],
+        args: this.buildAgentLaunchArgs(agent, bypassPermissions),
       });
       agent.terminalRef = terminal;
       this.postTerminalSnapshot(agent.id, snapshot);
@@ -361,7 +405,7 @@ export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
       agentId: agent.id,
       cwd: agent.cwd ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? os.homedir(),
       command: 'codex',
-      args: bypassPermissions ? ['--dangerously-bypass-approvals-and-sandbox'] : [],
+      args: this.buildAgentLaunchArgs(agent, bypassPermissions),
     });
     this.postTerminalSnapshot(agent.id, snapshot);
   }
@@ -376,9 +420,8 @@ export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async createAgentSession(
-    folderPath?: string,
-    bypassPermissions?: boolean,
-  ): Promise<void> {
+    options: CreateAgentSessionOptions = {},
+  ): Promise<{ agent?: AgentState; task?: MissionControlTask }> {
     const prevAgentIds = new Set(this.agents.keys());
     await launchNewTerminal(
       this.nextAgentId,
@@ -386,18 +429,27 @@ export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
       this.agents,
       this.webview,
       this.persistAgents,
-      folderPath,
+      options,
     );
+
+    let createdAgent: AgentState | undefined;
+    let task: MissionControlTask | undefined;
 
     for (const [id, agent] of this.agents) {
       if (prevAgentIds.has(id)) {
         continue;
       }
 
+      createdAgent = agent;
       this.registerAgentHook(agent);
       this.missionControlStore.recordAgentLaunch(agent);
-      this.launchAgentRuntime(agent, bypassPermissions);
+      if (options.taskInput) {
+        task = this.missionControlStore.submitTask(options.taskInput, agent, options.taskOptions);
+      }
+      this.launchAgentRuntime(agent, options.bypassPermissions);
     }
+
+    return { agent: createdAgent, task };
   }
 
   private buildTaskDispatchPrompt(task: MissionControlTask): string {
@@ -415,9 +467,626 @@ export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
       parts.push(`Expected artifacts: ${task.expectedArtifacts.join('; ')}`);
     }
 
+    if (task.ownedPaths.length > 0) {
+      parts.push(`Owned repo paths: ${task.ownedPaths.join('; ')}`);
+    }
+
     parts.push('If blocked, state the blocker and the smallest next input or approval needed.');
 
     return parts.join(' | ');
+  }
+
+  private buildWorkerInitialPrompt(
+    operatorPrompt: string,
+    planSummary: string,
+    assignment: MasterPlannerAssignment,
+    worktreePath: string,
+    branchName: string,
+    sharedConstraints: string[],
+  ): string {
+    const parts = [
+      `You are Worker ${assignment.slot} for a coordinated 3-session implementation run.`,
+      `Operator request: ${operatorPrompt.trim()}`,
+      `Team plan summary: ${planSummary.trim()}`,
+      `Your assignment title: ${assignment.title}`,
+      `Your goal: ${assignment.goal}`,
+      `Your worktree: ${worktreePath}`,
+      `Your branch: ${branchName}`,
+      `Owned repo paths: ${assignment.ownedPaths.join(', ')}`,
+      'Execution rules: only edit files inside your owned repo paths, do not merge branches, do not reassign work, and report blockers clearly.',
+      'If you need something outside your ownership, stop and explain the blocker instead of editing it yourself.',
+    ];
+
+    if (sharedConstraints.length > 0) {
+      parts.push(`Shared constraints: ${sharedConstraints.join('; ')}`);
+    }
+    if (assignment.acceptanceCriteria.length > 0) {
+      parts.push(`Acceptance criteria: ${assignment.acceptanceCriteria.join('; ')}`);
+    }
+    if (assignment.coordinationNotes.length > 0) {
+      parts.push(`Coordination notes: ${assignment.coordinationNotes.join('; ')}`);
+    }
+    if (assignment.dependsOnSlots.length > 0) {
+      parts.push(
+        `Dependencies: wait for updates from worker slots ${assignment.dependsOnSlots.join(', ')} if needed.`,
+      );
+    }
+
+    return parts.join('\n');
+  }
+
+  private getConfiguredProjectDirectories(): string[] {
+    return readConfig().projectDirectories;
+  }
+
+  private getKnownWorkingDirectories(): string[] {
+    const seen = new Set<string>();
+    const directories: string[] = [];
+
+    for (const folder of vscode.workspace.workspaceFolders ?? []) {
+      const folderPath = folder.uri.fsPath;
+      if (seen.has(folderPath)) {
+        continue;
+      }
+      seen.add(folderPath);
+      directories.push(folderPath);
+    }
+
+    for (const projectDirectory of this.getConfiguredProjectDirectories()) {
+      if (seen.has(projectDirectory)) {
+        continue;
+      }
+      seen.add(projectDirectory);
+      directories.push(projectDirectory);
+    }
+
+    return directories;
+  }
+
+  private async resolveWorkingDirectory(
+    preferredPath: string | undefined,
+    dialogLabel: string,
+  ): Promise<string | undefined> {
+    const trimmedPath = preferredPath?.trim();
+    if (trimmedPath) {
+      if (!fs.existsSync(trimmedPath)) {
+        void vscode.window.showWarningMessage(
+          `Pixel Agents: Working directory not found: ${trimmedPath}`,
+        );
+      } else {
+        return trimmedPath;
+      }
+    }
+
+    const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    if (workspaceRoot && fs.existsSync(workspaceRoot)) {
+      return workspaceRoot;
+    }
+
+    const configured = this.getConfiguredProjectDirectories().filter((directory) =>
+      fs.existsSync(directory),
+    );
+    if (configured.length === 1) {
+      return configured[0];
+    }
+
+    const uris = await vscode.window.showOpenDialog({
+      canSelectFolders: true,
+      canSelectFiles: false,
+      canSelectMany: false,
+      openLabel: dialogLabel,
+    });
+    return uris?.[0]?.fsPath;
+  }
+
+  private postProjectDirectoriesUpdated(): void {
+    this.webview?.postMessage({
+      type: 'projectDirectoriesUpdated',
+      dirs: this.getConfiguredProjectDirectories(),
+    });
+  }
+
+  private async startMasterOrchestration(message: {
+    prompt: string;
+    extraConstraints?: string[];
+    folderPath?: string;
+  }): Promise<void> {
+    const operatorPrompt = (message.prompt ?? '').trim();
+    if (!operatorPrompt) {
+      void vscode.window.showWarningMessage('Master orchestrator: prompt is required.');
+      return;
+    }
+
+    const orchestrator = this.missionControlStore.getSnapshot().orchestrator;
+    if (
+      orchestrator.status === 'planning' ||
+      orchestrator.status === 'provisioning' ||
+      orchestrator.status === 'dispatching' ||
+      orchestrator.status === 'running'
+    ) {
+      void vscode.window.showWarningMessage(
+        'Master orchestrator is already running. Wait for the current plan to finish provisioning.',
+      );
+      return;
+    }
+
+    const workspaceRoot = await this.resolveWorkingDirectory(
+      message.folderPath,
+      'Select Repository Directory',
+    );
+    if (!workspaceRoot) {
+      void vscode.window.showWarningMessage(
+        'Master orchestrator requires a repository directory to work in.',
+      );
+      return;
+    }
+
+    const runId = this.missionControlStore.startOrchestratorRun(
+      operatorPrompt,
+      (message.extraConstraints ?? []).map((constraint) => constraint.trim()).filter(Boolean),
+    );
+
+    try {
+      this.missionControlStore.recordOrchestratorProgress(runId, {
+        message: 'Resolving repository root and active branch.',
+        phaseLabel: 'Preparing Repository',
+        phaseDetail: 'Collecting repository context before planning the split.',
+      });
+      const { repoRoot, baseBranch } =
+        await this.worktreeManager.getRepositoryContext(workspaceRoot);
+
+      this.missionControlStore.recordOrchestratorProgress(runId, {
+        message: `Repository ready on branch ${baseBranch}. Checking tracked working tree state.`,
+        phaseLabel: 'Preparing Repository',
+        phaseDetail:
+          'Checking that the tracked working tree is clean before creating isolated worktrees.',
+      });
+      await this.worktreeManager.assertCleanTrackedTree(repoRoot);
+
+      const plan = await this.masterOrchestrator.planWork({
+        repoRoot,
+        baseBranch,
+        userPrompt: operatorPrompt,
+        extraConstraints: message.extraConstraints,
+        onProgress: (update) => {
+          this.missionControlStore.recordOrchestratorProgress(runId, {
+            message: update.message,
+            level: update.level,
+            phaseLabel: update.phaseLabel,
+            phaseDetail: update.phaseDetail,
+          });
+        },
+      });
+      this.missionControlStore.recordOrchestratorPlan(
+        runId,
+        plan.planSummary,
+        plan.sharedConstraints,
+        plan.assignments,
+      );
+
+      const provisioned = await this.worktreeManager.provision({
+        repoRoot,
+        runId,
+        slots: plan.assignments.map((assignment) => ({ slot: assignment.slot })),
+        onStatus: async (update) => {
+          this.missionControlStore.recordOrchestratorProgress(runId, {
+            message:
+              update.status === 'provisioning'
+                ? `Provisioning isolated workspace for worker ${update.slot.toString()}.`
+                : `Workspace ready for worker ${update.slot.toString()}.`,
+            level: update.status === 'ready' ? 'success' : 'info',
+            status: 'provisioning',
+            phaseLabel: 'Provisioning Workspaces',
+            phaseDetail:
+              update.status === 'provisioning'
+                ? `Creating worktree and branch for worker ${update.slot.toString()}.`
+                : `Worker ${update.slot.toString()} workspace is ready for dispatch.`,
+          });
+          this.missionControlStore.upsertWorkspaceAssignment({
+            repoRoot: update.repoRoot,
+            branchName: update.branchName,
+            worktreePath: update.worktreePath,
+            status: update.status,
+            orchestrationRunId: runId,
+            slot: update.slot,
+          });
+        },
+      });
+
+      this.missionControlStore.recordOrchestratorDispatching(runId);
+
+      for (const assignment of plan.assignments) {
+        const worktree = provisioned.find((candidate) => candidate.slot === assignment.slot);
+        if (!worktree) {
+          throw new Error(`Missing worktree allocation for worker slot ${assignment.slot}.`);
+        }
+
+        this.missionControlStore.recordOrchestratorProgress(runId, {
+          message: `Launching worker ${assignment.slot.toString()} with assignment "${assignment.title}".`,
+          level: 'info',
+          status: 'dispatching',
+          phaseLabel: 'Launching Workers',
+          phaseDetail: `Dispatching worker ${assignment.slot.toString()} into its isolated worktree.`,
+        });
+
+        const workspaceAssignment = this.missionControlStore.upsertWorkspaceAssignment({
+          repoRoot: worktree.repoRoot,
+          branchName: worktree.branchName,
+          worktreePath: worktree.worktreePath,
+          status: 'ready',
+          orchestrationRunId: runId,
+          slot: assignment.slot,
+        });
+
+        const workerPrompt = this.buildWorkerInitialPrompt(
+          operatorPrompt,
+          plan.planSummary,
+          assignment,
+          worktree.worktreePath,
+          worktree.branchName,
+          plan.sharedConstraints,
+        );
+        const task = {
+          title: assignment.title,
+          goal: assignment.goal,
+          priority: 'high' as const,
+          acceptanceCriteria: assignment.acceptanceCriteria,
+          constraints: [
+            ...plan.sharedConstraints,
+            ...assignment.coordinationNotes,
+            `Only edit owned repo paths: ${assignment.ownedPaths.join(', ')}`,
+          ],
+          expectedArtifacts: assignment.ownedPaths,
+        };
+
+        const created = await this.createAgentSession({
+          folderPath: worktree.worktreePath,
+          displayName: `Worker ${assignment.slot}`,
+          folderName: `W${assignment.slot}`,
+          initialPrompt: workerPrompt,
+          orchestrationRunId: runId,
+          workspaceAssignmentId: workspaceAssignment.id,
+          taskInput: task,
+          taskOptions: {
+            createdBy: 'master',
+            orchestrationRunId: runId,
+            ownedPaths: assignment.ownedPaths,
+          },
+        });
+
+        if (!created.agent || !created.task) {
+          throw new Error(`Failed to create worker session for slot ${assignment.slot}.`);
+        }
+
+        this.missionControlStore.recordOrchestratorAssignmentLaunch(runId, assignment.slot, {
+          agentId: created.agent.id,
+          taskId: created.task.id,
+          workspaceAssignmentId: workspaceAssignment.id,
+        });
+      }
+    } catch (error) {
+      const reason =
+        error instanceof Error ? error.message : 'Master orchestrator failed unexpectedly.';
+      this.missionControlStore.recordOrchestratorFailure(runId, reason);
+      void vscode.window.showErrorMessage(`Master orchestrator: ${reason}`);
+    }
+  }
+
+  private getMasterAssignmentContext(slot: number):
+    | {
+        runId?: string;
+        assignment: ReturnType<
+          MissionControlStore['getSnapshot']
+        >['orchestrator']['assignments'][number];
+        workspace: ReturnType<MissionControlStore['getSnapshot']>['workspaces'][number];
+      }
+    | undefined {
+    const snapshot = this.missionControlStore.getSnapshot();
+    const assignment = snapshot.orchestrator.assignments.find(
+      (candidate) => candidate.slot === slot,
+    );
+    if (!assignment?.workspaceAssignmentId) {
+      return undefined;
+    }
+    const workspace = snapshot.workspaces.find(
+      (candidate) => candidate.id === assignment.workspaceAssignmentId,
+    );
+    if (!workspace) {
+      return undefined;
+    }
+    return {
+      runId: snapshot.orchestrator.activeRunId,
+      assignment,
+      workspace,
+    };
+  }
+
+  private getMasterAssignmentsWithWorkspace(): Array<{
+    runId?: string;
+    assignment: ReturnType<
+      MissionControlStore['getSnapshot']
+    >['orchestrator']['assignments'][number];
+    workspace: ReturnType<MissionControlStore['getSnapshot']>['workspaces'][number];
+  }> {
+    const snapshot = this.missionControlStore.getSnapshot();
+    const workspacesById = new Map(
+      snapshot.workspaces.map((workspace) => [workspace.id, workspace] as const),
+    );
+    return snapshot.orchestrator.assignments
+      .map((assignment) => {
+        if (!assignment.workspaceAssignmentId) {
+          return undefined;
+        }
+        const workspace = workspacesById.get(assignment.workspaceAssignmentId);
+        if (!workspace) {
+          return undefined;
+        }
+        return {
+          runId: snapshot.orchestrator.activeRunId,
+          assignment,
+          workspace,
+        };
+      })
+      .filter((value): value is NonNullable<typeof value> => !!value);
+  }
+
+  private postMasterWorkerReview(
+    slot: number,
+    review: WorktreeReview,
+    context: {
+      branchName?: string;
+      repoRoot: string;
+      worktreePath: string;
+      title: string;
+    },
+  ): void {
+    this.webview?.postMessage({
+      type: 'masterWorkerReviewLoaded',
+      slot,
+      review: {
+        ...review,
+        branchName: context.branchName,
+        repoRoot: context.repoRoot,
+        worktreePath: context.worktreePath,
+        title: context.title,
+      },
+    });
+  }
+
+  private async loadMasterWorkerReview(slot: number): Promise<void> {
+    const context = this.getMasterAssignmentContext(slot);
+    if (!context) {
+      this.webview?.postMessage({
+        type: 'masterWorkerReviewFailed',
+        slot,
+        error: `Worker ${slot.toString()} is missing its workspace assignment.`,
+      });
+      return;
+    }
+
+    try {
+      const review = await this.worktreeManager.getWorktreeReview({
+        repoRoot: context.workspace.repoRoot,
+        worktreePath: context.workspace.worktreePath,
+        ownedPaths: context.assignment.ownedPaths,
+      });
+      if (review.hasChanges) {
+        this.missionControlStore.upsertWorkspaceAssignment({
+          repoRoot: context.workspace.repoRoot,
+          branchName: context.workspace.branchName,
+          worktreePath: context.workspace.worktreePath,
+          status: 'merge_pending',
+          assignedSessionId: context.workspace.assignedSessionId,
+          orchestrationRunId: context.workspace.orchestrationRunId,
+          slot: context.workspace.slot,
+        });
+      }
+      this.postMasterWorkerReview(slot, review, {
+        branchName: context.workspace.branchName,
+        repoRoot: context.workspace.repoRoot,
+        worktreePath: context.workspace.worktreePath,
+        title: context.assignment.title,
+      });
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : 'Failed to load worker review.';
+      this.webview?.postMessage({
+        type: 'masterWorkerReviewFailed',
+        slot,
+        error: reason,
+      });
+    }
+  }
+
+  private async applyMasterWorkerChanges(slot: number): Promise<void> {
+    const context = this.getMasterAssignmentContext(slot);
+    if (!context) {
+      this.webview?.postMessage({
+        type: 'masterWorkerReviewApplyFailed',
+        slot,
+        error: `Worker ${slot.toString()} is missing its workspace assignment.`,
+      });
+      return;
+    }
+
+    try {
+      const result = await this.worktreeManager.applyWorktreeChanges({
+        repoRoot: context.workspace.repoRoot,
+        worktreePath: context.workspace.worktreePath,
+        ownedPaths: context.assignment.ownedPaths,
+      });
+      this.missionControlStore.upsertWorkspaceAssignment({
+        repoRoot: context.workspace.repoRoot,
+        branchName: context.workspace.branchName,
+        worktreePath: context.workspace.worktreePath,
+        status: result.hasChanges ? 'merged' : 'ready',
+        assignedSessionId: context.workspace.assignedSessionId,
+        orchestrationRunId: context.workspace.orchestrationRunId,
+        slot: context.workspace.slot,
+      });
+
+      if (context.runId && result.hasChanges) {
+        this.missionControlStore.recordOrchestratorProgress(context.runId, {
+          message: `Approved worker ${slot.toString()} changes and applied them to the main checkout.`,
+          level: 'success',
+          phaseLabel: 'Review Applied',
+          phaseDetail: `Worker ${slot.toString()} changes now exist in ${context.workspace.repoRoot}.`,
+          status: 'completed',
+        });
+      }
+
+      this.webview?.postMessage({
+        type: 'masterWorkerReviewApplied',
+        slot,
+        result,
+      });
+      void vscode.window.showInformationMessage(
+        result.hasChanges
+          ? `Worker ${slot.toString()} changes were applied to the main checkout.`
+          : `Worker ${slot.toString()} has no pending changes to apply.`,
+      );
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : 'Failed to apply worker changes.';
+      this.webview?.postMessage({
+        type: 'masterWorkerReviewApplyFailed',
+        slot,
+        error: reason,
+      });
+      void vscode.window.showErrorMessage(`Master orchestrator: ${reason}`);
+    }
+  }
+
+  private async loadMasterTeamReview(): Promise<void> {
+    const contexts = this.getMasterAssignmentsWithWorkspace();
+    if (contexts.length === 0) {
+      this.webview?.postMessage({
+        type: 'masterTeamReviewFailed',
+        error: 'No worker workspaces are available for review yet.',
+      });
+      return;
+    }
+
+    try {
+      const workers = await Promise.all(
+        contexts.map(async (context) => {
+          const review = await this.worktreeManager.getWorktreeReview({
+            repoRoot: context.workspace.repoRoot,
+            worktreePath: context.workspace.worktreePath,
+            ownedPaths: context.assignment.ownedPaths,
+          });
+          if (review.hasChanges) {
+            this.missionControlStore.upsertWorkspaceAssignment({
+              repoRoot: context.workspace.repoRoot,
+              branchName: context.workspace.branchName,
+              worktreePath: context.workspace.worktreePath,
+              status: 'merge_pending',
+              assignedSessionId: context.workspace.assignedSessionId,
+              orchestrationRunId: context.workspace.orchestrationRunId,
+              slot: context.workspace.slot,
+            });
+          }
+          return {
+            slot: context.assignment.slot,
+            title: context.assignment.title,
+            branchName: context.workspace.branchName,
+            repoRoot: context.workspace.repoRoot,
+            worktreePath: context.workspace.worktreePath,
+            ownedPaths: review.ownedPaths,
+            changedFiles: review.changedFiles,
+            diff: review.diff,
+            diffTruncated: review.diffTruncated,
+            hasChanges: review.hasChanges,
+          };
+        }),
+      );
+
+      this.webview?.postMessage({
+        type: 'masterTeamReviewLoaded',
+        review: {
+          runId: this.missionControlStore.getSnapshot().orchestrator.activeRunId,
+          workers,
+        },
+      });
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : 'Failed to load team review.';
+      this.webview?.postMessage({
+        type: 'masterTeamReviewFailed',
+        error: reason,
+      });
+    }
+  }
+
+  private async applyMasterTeamReview(): Promise<void> {
+    const contexts = this.getMasterAssignmentsWithWorkspace();
+    if (contexts.length === 0) {
+      this.webview?.postMessage({
+        type: 'masterTeamReviewApplyFailed',
+        error: 'No worker workspaces are available to apply.',
+      });
+      return;
+    }
+
+    try {
+      const workers = [];
+      let totalAppliedFiles = 0;
+      let totalRemovedFiles = 0;
+
+      for (const context of contexts) {
+        const result = await this.worktreeManager.applyWorktreeChanges({
+          repoRoot: context.workspace.repoRoot,
+          worktreePath: context.workspace.worktreePath,
+          ownedPaths: context.assignment.ownedPaths,
+        });
+        this.missionControlStore.upsertWorkspaceAssignment({
+          repoRoot: context.workspace.repoRoot,
+          branchName: context.workspace.branchName,
+          worktreePath: context.workspace.worktreePath,
+          status: result.hasChanges ? 'merged' : context.workspace.status,
+          assignedSessionId: context.workspace.assignedSessionId,
+          orchestrationRunId: context.workspace.orchestrationRunId,
+          slot: context.workspace.slot,
+        });
+        totalAppliedFiles += result.appliedFiles.length;
+        totalRemovedFiles += result.removedFiles.length;
+        workers.push({
+          slot: context.assignment.slot,
+          title: context.assignment.title,
+          appliedFiles: result.appliedFiles,
+          removedFiles: result.removedFiles,
+          hasChanges: result.hasChanges,
+        });
+      }
+
+      const runId = this.missionControlStore.getSnapshot().orchestrator.activeRunId;
+      if (runId) {
+        this.missionControlStore.recordOrchestratorProgress(runId, {
+          message: `Approved the full team review and applied ${totalAppliedFiles.toString()} file(s) with ${totalRemovedFiles.toString()} removals to the main checkout.`,
+          level: 'success',
+          phaseLabel: 'Review Applied',
+          phaseDetail:
+            'All approved worker changes now exist in the main checkout and are ready for commit.',
+          status: 'completed',
+        });
+      }
+
+      this.webview?.postMessage({
+        type: 'masterTeamReviewApplied',
+        result: {
+          workers,
+          totalAppliedFiles,
+          totalRemovedFiles,
+        },
+      });
+      void vscode.window.showInformationMessage(
+        `Approved team review. Applied ${totalAppliedFiles.toString()} file(s) with ${totalRemovedFiles.toString()} removals to the main checkout.`,
+      );
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : 'Failed to apply team review.';
+      this.webview?.postMessage({
+        type: 'masterTeamReviewApplyFailed',
+        error: reason,
+      });
+      void vscode.window.showErrorMessage(`Master orchestrator: ${reason}`);
+    }
   }
 
   private async interruptAgent(agentId: number): Promise<void> {
@@ -512,17 +1181,72 @@ export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
     this.hookEventHandler?.unregisterAgent(agent.sessionId);
   }
 
+  async toggleVoiceDictation(): Promise<void> {
+    if (await this.voiceDictationManager.toggle()) {
+      return;
+    }
+
+    if (this.webviewReady) {
+      this.webview?.postMessage({ type: 'toggleVoiceDictation' });
+      return;
+    }
+
+    this.pendingVoiceDictationToggle = true;
+    await vscode.commands.executeCommand(COMMAND_SHOW_PANEL);
+  }
+
+  private async insertVoiceDictationText(text: string): Promise<void> {
+    if (!text) {
+      return;
+    }
+
+    try {
+      await vscode.commands.executeCommand('type', { text });
+    } catch (err) {
+      console.error('[Pixel Agents] Voice dictation insert failed:', err);
+      void vscode.window.showWarningMessage(
+        'Pixel Agents: Could not insert dictated text into the current VS Code input.',
+      );
+    }
+  }
+
   resolveWebviewView(webviewView: vscode.WebviewView) {
     this.webviewView = webviewView;
+    this.webviewReady = false;
     webviewView.webview.options = { enableScripts: true };
     webviewView.webview.html = getWebviewContent(webviewView.webview, this.extensionUri);
 
     webviewView.webview.onDidReceiveMessage(async (message) => {
       if (message.type === 'openCodex') {
-        await this.createAgentSession(
+        const folderPath = await this.resolveWorkingDirectory(
           message.folderPath as string | undefined,
-          message.bypassPermissions as boolean | undefined,
+          'Select Working Directory',
         );
+        if (!folderPath) {
+          return;
+        }
+        await this.createAgentSession({
+          folderPath,
+          bypassPermissions: message.bypassPermissions as boolean | undefined,
+        });
+      } else if (message.type === 'startMasterOrchestration') {
+        await this.startMasterOrchestration({
+          prompt: message.prompt as string,
+          extraConstraints: (message.extraConstraints as string[] | undefined) ?? [],
+          folderPath: message.folderPath as string | undefined,
+        });
+      } else if (message.type === 'resetMasterOrchestrator') {
+        this.missionControlStore.resetOrchestrator(
+          'Master orchestrator was reset by the operator.',
+        );
+      } else if (message.type === 'loadMasterWorkerReview') {
+        await this.loadMasterWorkerReview(message.slot as number);
+      } else if (message.type === 'applyMasterWorkerChanges') {
+        await this.applyMasterWorkerChanges(message.slot as number);
+      } else if (message.type === 'loadMasterTeamReview') {
+        await this.loadMasterTeamReview();
+      } else if (message.type === 'applyMasterTeamReview') {
+        await this.applyMasterTeamReview();
       } else if (message.type === 'terminalInput') {
         this.sendManagedTerminalInput(message.agentId as number, message.data as string);
       } else if (message.type === 'terminalResize') {
@@ -658,8 +1382,8 @@ export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
         this.watchAllSessions.current = enabled;
         if (!enabled) {
           const workspaceDirs = new Set<string>();
-          for (const folder of vscode.workspace.workspaceFolders ?? []) {
-            const dir = getProjectDirPath(folder.uri.fsPath);
+          for (const directory of this.getKnownWorkingDirectories()) {
+            const dir = getProjectDirPath(directory);
             if (dir) workspaceDirs.add(dir);
           }
           const toRemove: number[] = [];
@@ -687,6 +1411,7 @@ export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
           }
         }
       } else if (message.type === 'webviewReady') {
+        this.webviewReady = true;
         restoreAgents(
           this.context,
           this.nextAgentId,
@@ -731,15 +1456,14 @@ export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
           hooksEnabled,
           hooksInfoShown,
           externalAssetDirectories: config.externalAssetDirectories,
+          projectDirectories: config.projectDirectories,
         });
 
         const wsFolders = vscode.workspace.workspaceFolders;
-        if (wsFolders && wsFolders.length > 0) {
-          this.webview?.postMessage({
-            type: 'workspaceFolders',
-            folders: wsFolders.map((f) => ({ name: f.name, path: f.uri.fsPath })),
-          });
-        }
+        this.webview?.postMessage({
+          type: 'workspaceFolders',
+          folders: (wsFolders ?? []).map((f) => ({ name: f.name, path: f.uri.fsPath })),
+        });
 
         (async () => {
           try {
@@ -803,6 +1527,13 @@ export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
         if (this.shouldAutoCreateNativeMasterSession()) {
           await this.createAgentSession();
         }
+        if (this.pendingVoiceDictationToggle) {
+          this.pendingVoiceDictationToggle = false;
+          this.webview?.postMessage({ type: 'toggleVoiceDictation' });
+        }
+      } else if (message.type === 'voiceDictationTypeText') {
+        const text = typeof message.text === 'string' ? message.text : '';
+        await this.insertVoiceDictationText(text);
       } else if (message.type === 'requestDiagnostics') {
         const diagnostics: Array<Record<string, unknown>> = [];
         for (const [, agent] of this.agents) {
@@ -852,6 +1583,28 @@ export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
           type: 'externalAssetDirectoriesUpdated',
           dirs: cfg.externalAssetDirectories,
         });
+      } else if (message.type === 'addProjectDirectory') {
+        const uris = await vscode.window.showOpenDialog({
+          canSelectFolders: true,
+          canSelectFiles: false,
+          canSelectMany: false,
+          openLabel: 'Select Project Directory',
+        });
+        if (!uris || uris.length === 0) return;
+        const newPath = uris[0].fsPath;
+        const cfg = readConfig();
+        if (!cfg.projectDirectories.includes(newPath)) {
+          cfg.projectDirectories.push(newPath);
+          writeConfig(cfg);
+        }
+        this.postProjectDirectoriesUpdated();
+      } else if (message.type === 'removeProjectDirectory') {
+        const cfg = readConfig();
+        cfg.projectDirectories = cfg.projectDirectories.filter(
+          (d) => d !== (message.path as string),
+        );
+        writeConfig(cfg);
+        this.postProjectDirectoriesUpdated();
       } else if (message.type === 'removeExternalAssetDirectory') {
         const cfg = readConfig();
         cfg.externalAssetDirectories = cfg.externalAssetDirectories.filter(
@@ -1007,6 +1760,7 @@ export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
   dispose() {
     this.missionControlUnsubscribe?.();
     this.missionControlUnsubscribe = null;
+    this.voiceDictationManager.dispose();
     this.embeddedTerminalManager.disposeAll();
     this.nativeTerminalManager.dispose();
     this.missionControlStore.dispose();

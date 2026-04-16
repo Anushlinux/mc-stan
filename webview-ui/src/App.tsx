@@ -6,6 +6,7 @@ import { CanvasAgentTerminalDock } from './components/CanvasAgentTerminalDock.js
 import { ChangelogModal } from './components/ChangelogModal.js';
 import { DebugView } from './components/DebugView.js';
 import { EditActionBar } from './components/EditActionBar.js';
+import { MasterAgentLauncher } from './components/MasterAgentLauncher.js';
 import { MigrationNotice } from './components/MigrationNotice.js';
 import type { MissionControlView } from './components/MissionControlModal.js';
 import { MissionControlModal } from './components/MissionControlModal.js';
@@ -17,6 +18,7 @@ import { ZoomControls } from './components/ZoomControls.js';
 import { useEditorActions } from './hooks/useEditorActions.js';
 import { useEditorKeyboard } from './hooks/useEditorKeyboard.js';
 import { useExtensionMessages } from './hooks/useExtensionMessages.js';
+import { useVoiceDictation } from './hooks/useVoiceDictation.js';
 import { OfficeCanvas } from './office/components/OfficeCanvas.js';
 import { ToolOverlay } from './office/components/ToolOverlay.js';
 import { EditorState } from './office/editor/editorState.js';
@@ -65,6 +67,7 @@ function App() {
     layoutWasReset,
     loadedAssets,
     workspaceFolders,
+    projectDirectories,
     externalAssetDirectories,
     lastSeenVersion,
     extensionVersion,
@@ -185,7 +188,15 @@ function App() {
     });
   }, []);
 
+  const handleOpenMasterOrchestrator = useCallback(() => {
+    setMissionControlView('master');
+    setIsMissionControlOpen(true);
+  }, []);
+
   const officeState = getOfficeState();
+  const voiceDictation = useVoiceDictation({
+    activeTerminalAgentId: isCanvasTerminalOpen ? canvasTerminalAgentId : null,
+  });
 
   // Force dependency on editorTickForKeyboard to propagate keyboard-triggered re-renders
   void editorTickForKeyboard;
@@ -313,6 +324,12 @@ function App() {
             />
           ) : null}
 
+          <MasterAgentLauncher
+            status={missionControl.orchestrator.status}
+            phaseLabel={missionControl.orchestrator.currentPhaseLabel}
+            onClick={handleOpenMasterOrchestrator}
+          />
+
           <MissionControlModal
             isOpen={isMissionControlOpen}
             onClose={() => setIsMissionControlOpen(false)}
@@ -322,6 +339,8 @@ function App() {
             embeddedTerminals={embeddedTerminals}
             onInspectAgent={setInspectedAgentId}
             initialView={missionControlView}
+            workspaceFolders={workspaceFolders}
+            projectDirectories={projectDirectories}
           />
         </>
       ) : (
@@ -400,9 +419,26 @@ function App() {
         isSettingsOpen={isSettingsOpen}
         onToggleSettings={() => setIsSettingsOpen((v) => !v)}
         workspaceFolders={workspaceFolders}
+        projectDirectories={projectDirectories}
         isMissionControlOpen={isMissionControlOpen}
         onToggleMissionControl={handleToggleMissionControl}
       />
+
+      {voiceDictation.notice ? (
+        <div className="pointer-events-none absolute bottom-84 left-1/2 z-40 -translate-x-1/2">
+          <div
+            className={`border-2 px-10 py-5 text-sm uppercase shadow-pixel ${
+              voiceDictation.notice.tone === 'listening'
+                ? 'voice-dictation-banner-listening border-status-active text-status-active'
+                : voiceDictation.notice.tone === 'error'
+                  ? 'voice-dictation-banner-error border-status-error text-white'
+                  : 'voice-dictation-banner-idle border-border text-text-muted'
+            }`}
+          >
+            {voiceDictation.notice.label}
+          </div>
+        </div>
+      ) : null}
 
       <VersionIndicator
         currentVersion={extensionVersion}
@@ -424,6 +460,7 @@ function App() {
         onToggleDebugMode={handleToggleDebugMode}
         alwaysShowOverlay={alwaysShowOverlay}
         onToggleAlwaysShowOverlay={handleToggleAlwaysShowOverlay}
+        projectDirectories={projectDirectories}
         externalAssetDirectories={externalAssetDirectories}
         watchAllSessions={watchAllSessions}
         onToggleWatchAllSessions={() => {

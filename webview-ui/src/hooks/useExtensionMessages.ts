@@ -46,6 +46,7 @@ interface FurnitureAsset {
 export interface WorkspaceFolder {
   name: string;
   path: string;
+  source?: 'workspace' | 'project';
 }
 
 export type EmbeddedTerminalState = EmbeddedTerminalSnapshot;
@@ -61,6 +62,7 @@ interface ExtensionMessageState {
   layoutWasReset: boolean;
   loadedAssets?: { catalog: FurnitureAsset[]; sprites: Record<string, string[][]> };
   workspaceFolders: WorkspaceFolder[];
+  projectDirectories: WorkspaceFolder[];
   externalAssetDirectories: string[];
   lastSeenVersion: string;
   extensionVersion: string;
@@ -85,8 +87,34 @@ function createEmptyMissionControlSnapshot(): MissionControlSnapshot {
     artifacts: [],
     workspaces: [],
     briefings: [],
+    orchestrator: {
+      status: 'idle',
+      sharedConstraints: [],
+      assignments: [],
+      progressEntries: [],
+      updatedAt: '',
+    },
     activeSessionByAgentId: {},
   };
+}
+
+function toWorkspaceFolderEntries(
+  folders: Array<{ name: string; path: string }>,
+  source: WorkspaceFolder['source'],
+): WorkspaceFolder[] {
+  return folders.map((folder) => ({
+    name: folder.name,
+    path: folder.path,
+    source,
+  }));
+}
+
+function toProjectDirectoryEntries(paths: string[]): WorkspaceFolder[] {
+  return paths.map((projectPath) => ({
+    name: projectPath.split(/[/\\]/).filter(Boolean).pop() ?? projectPath,
+    path: projectPath,
+    source: 'project',
+  }));
 }
 
 function saveAgentSeats(os: OfficeState): void {
@@ -117,6 +145,7 @@ export function useExtensionMessages(
     { catalog: FurnitureAsset[]; sprites: Record<string, string[][]> } | undefined
   >();
   const [workspaceFolders, setWorkspaceFolders] = useState<WorkspaceFolder[]>([]);
+  const [projectDirectories, setProjectDirectories] = useState<WorkspaceFolder[]>([]);
   const [externalAssetDirectories, setExternalAssetDirectories] = useState<string[]>([]);
   const [lastSeenVersion, setLastSeenVersion] = useState('');
   const [extensionVersion, setExtensionVersion] = useState('');
@@ -440,7 +469,7 @@ export function useExtensionMessages(
         setWallSprites(sets);
       } else if (msg.type === 'workspaceFolders') {
         const folders = msg.folders as WorkspaceFolder[];
-        setWorkspaceFolders(folders);
+        setWorkspaceFolders(toWorkspaceFolderEntries(folders, 'workspace'));
       } else if (msg.type === 'settingsLoaded') {
         const soundOn = msg.soundEnabled as boolean;
         setSoundEnabled(soundOn);
@@ -458,6 +487,9 @@ export function useExtensionMessages(
         }
         if (Array.isArray(msg.externalAssetDirectories)) {
           setExternalAssetDirectories(msg.externalAssetDirectories as string[]);
+        }
+        if (Array.isArray(msg.projectDirectories)) {
+          setProjectDirectories(toProjectDirectoryEntries(msg.projectDirectories as string[]));
         }
         if (typeof msg.lastSeenVersion === 'string') {
           setLastSeenVersion(msg.lastSeenVersion as string);
@@ -507,6 +539,10 @@ export function useExtensionMessages(
         if (Array.isArray(msg.dirs)) {
           setExternalAssetDirectories(msg.dirs as string[]);
         }
+      } else if (msg.type === 'projectDirectoriesUpdated') {
+        if (Array.isArray(msg.dirs)) {
+          setProjectDirectories(toProjectDirectoryEntries(msg.dirs as string[]));
+        }
       } else if (msg.type === 'furnitureAssetsLoaded') {
         try {
           const catalog = msg.catalog as FurnitureAsset[];
@@ -537,6 +573,7 @@ export function useExtensionMessages(
     layoutWasReset,
     loadedAssets,
     workspaceFolders,
+    projectDirectories,
     externalAssetDirectories,
     lastSeenVersion,
     extensionVersion,

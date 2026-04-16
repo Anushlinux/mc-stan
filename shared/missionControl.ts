@@ -70,6 +70,18 @@ export type MissionControlWorkspaceStatus =
   | 'merged'
   | 'abandoned';
 
+export type MissionControlOrchestratorStatus =
+  | 'idle'
+  | 'planning'
+  | 'provisioning'
+  | 'dispatching'
+  | 'running'
+  | 'blocked'
+  | 'failed'
+  | 'completed';
+
+export type MissionControlOrchestratorProgressLevel = 'info' | 'success' | 'warning' | 'error';
+
 export interface MissionControlTaskBudget {
   maxTurns?: number;
   maxApprovals?: number;
@@ -133,6 +145,43 @@ export interface MissionControlWorkspaceAssignment {
   baseBranch?: string;
   status: MissionControlWorkspaceStatus;
   assignedSessionId?: string;
+  orchestrationRunId?: string;
+  slot?: number;
+  updatedAt: string;
+}
+
+export interface MissionControlOrchestratorAssignment {
+  slot: number;
+  title: string;
+  goal: string;
+  ownedPaths: string[];
+  acceptanceCriteria: string[];
+  coordinationNotes: string[];
+  dependsOnSlots: number[];
+  agentId?: number;
+  taskId?: string;
+  workspaceAssignmentId?: string;
+}
+
+export interface MissionControlOrchestratorProgressEntry {
+  id: string;
+  timestamp: string;
+  level: MissionControlOrchestratorProgressLevel;
+  message: string;
+}
+
+export interface MissionControlOrchestratorState {
+  status: MissionControlOrchestratorStatus;
+  activeRunId?: string;
+  startedAt?: string;
+  lastPrompt?: string;
+  lastPlanSummary?: string;
+  currentPhaseLabel?: string;
+  currentPhaseDetail?: string;
+  sharedConstraints: string[];
+  assignments: MissionControlOrchestratorAssignment[];
+  progressEntries: MissionControlOrchestratorProgressEntry[];
+  error?: string;
   updatedAt: string;
 }
 
@@ -161,8 +210,10 @@ export interface MissionControlTask {
   expectedArtifacts: string[];
   acceptanceCriteria: string[];
   constraints: string[];
+  ownedPaths: string[];
   briefingId?: string;
   workspaceAssignmentId?: string;
+  orchestrationRunId?: string;
   budget?: MissionControlTaskBudget;
   blockedReason?: MissionControlBlockedReason;
   latestUpdate?: string;
@@ -175,6 +226,7 @@ export interface MissionControlAgentSession {
   id: string;
   agentId: number;
   provider: string;
+  displayName?: string;
   sessionId?: string;
   isExternal?: boolean;
   taskId?: string;
@@ -205,6 +257,7 @@ export interface MissionControlSnapshot {
   artifacts: MissionControlArtifact[];
   workspaces: MissionControlWorkspaceAssignment[];
   briefings: MissionControlBriefing[];
+  orchestrator: MissionControlOrchestratorState;
   activeSessionByAgentId: Record<number, string>;
 }
 
