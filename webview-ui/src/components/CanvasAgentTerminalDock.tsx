@@ -94,6 +94,7 @@ export function CanvasAgentTerminalDock({
   const session = getSessionForAgent(agentId, missionControl);
   const task = getTaskForSession(session, missionControl);
   const title = session ? getSessionTaskLabel(session, task) : 'Session startup in progress';
+  const agentLabel = session?.displayName ?? `Agent #${agentId}`;
   const statusLabel = getStatusLabel(session, terminal);
   const statusTone = getStatusTone(session, terminal);
   const progressLabel = getProgressLabel(session, task, terminal);
@@ -106,7 +107,7 @@ export function CanvasAgentTerminalDock({
         onClick={onOpen}
         aria-label={`Show terminal for Agent #${agentId}`}
       >
-        <span className="canvas-terminal-tab-label">Agent #{agentId}</span>
+        <span className="canvas-terminal-tab-label">{agentLabel}</span>
       </button>
     );
   }
@@ -116,7 +117,7 @@ export function CanvasAgentTerminalDock({
       <div className="flex items-start justify-between gap-6 border-b-2 border-border px-8 py-7">
         <div className="min-w-0">
           <div className="text-2xs uppercase text-text-muted">Canvas Terminal</div>
-          <div className="mt-2 text-sm text-white">Agent #{agentId}</div>
+          <div className="mt-2 text-sm text-white">{agentLabel}</div>
           <div className="mt-2 truncate text-xs text-text-muted">{title}</div>
           <div className="mt-3 text-2xs leading-relaxed text-text-muted">{progressLabel}</div>
         </div>

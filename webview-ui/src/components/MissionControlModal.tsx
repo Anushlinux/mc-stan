@@ -1,13 +1,14 @@
 import { useEffect, useMemo, useState } from 'react';
 
 import type { MissionControlSnapshot } from '../../../shared/missionControl.ts';
-import type { EmbeddedTerminalState } from '../hooks/useExtensionMessages.js';
+import type { EmbeddedTerminalState, WorkspaceFolder } from '../hooks/useExtensionMessages.js';
 import { AgentInspectorDrawer } from './AgentInspectorDrawer.js';
+import { MasterOrchestratorPanel } from './MasterOrchestratorPanel.js';
 import { MissionControlDispatchPanel } from './MissionControlDispatchPanel.js';
 import { MissionControlPanel } from './MissionControlPanel.js';
 import { Button } from './ui/Button.js';
 
-export type MissionControlView = 'overview' | 'dispatch' | 'agent';
+export type MissionControlView = 'overview' | 'dispatch' | 'master' | 'agent';
 
 interface MissionControlModalProps {
   isOpen: boolean;
@@ -18,6 +19,8 @@ interface MissionControlModalProps {
   embeddedTerminals: Record<number, EmbeddedTerminalState>;
   onInspectAgent: (agentId: number) => void;
   initialView?: MissionControlView;
+  workspaceFolders: WorkspaceFolder[];
+  projectDirectories: WorkspaceFolder[];
 }
 
 function getToneClass(kind: 'active' | 'attention' | 'approval'): string {
@@ -35,6 +38,8 @@ export function MissionControlModal({
   embeddedTerminals,
   onInspectAgent,
   initialView = 'overview',
+  workspaceFolders,
+  projectDirectories,
 }: MissionControlModalProps) {
   const [activeView, setActiveView] = useState<MissionControlView>(initialView);
 
@@ -131,6 +136,13 @@ export function MissionControlModal({
             </Button>
             <Button
               size="sm"
+              variant={activeView === 'master' ? 'active' : 'default'}
+              onClick={() => setActiveView('master')}
+            >
+              Master
+            </Button>
+            <Button
+              size="sm"
               variant={activeView === 'agent' ? 'active' : 'default'}
               onClick={() => setActiveView('agent')}
             >
@@ -154,6 +166,14 @@ export function MissionControlModal({
               selectedAgentId={selectedSession}
               missionControl={missionControl}
               onInspectAgent={handleInspectAgent}
+            />
+          ) : null}
+          {activeView === 'master' ? (
+            <MasterOrchestratorPanel
+              missionControl={missionControl}
+              onInspectAgent={handleInspectAgent}
+              workspaceFolders={workspaceFolders}
+              projectDirectories={projectDirectories}
             />
           ) : null}
           {activeView === 'agent' ? (

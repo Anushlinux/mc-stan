@@ -6,11 +6,19 @@ import { CONFIG_FILE_NAME, LAYOUT_FILE_DIR } from './constants.js';
 
 export interface PixelAgentsConfig {
   externalAssetDirectories: string[];
+  projectDirectories: string[];
 }
 
 const DEFAULT_CONFIG: PixelAgentsConfig = {
   externalAssetDirectories: [],
+  projectDirectories: [],
 };
+
+function readPathList(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((entry): entry is string => typeof entry === 'string')
+    : [];
+}
 
 function getConfigFilePath(): string {
   return path.join(os.homedir(), LAYOUT_FILE_DIR, CONFIG_FILE_NAME);
@@ -23,9 +31,8 @@ export function readConfig(): PixelAgentsConfig {
     const raw = fs.readFileSync(filePath, 'utf-8');
     const parsed = JSON.parse(raw) as Partial<PixelAgentsConfig>;
     return {
-      externalAssetDirectories: Array.isArray(parsed.externalAssetDirectories)
-        ? parsed.externalAssetDirectories.filter((d): d is string => typeof d === 'string')
-        : [],
+      externalAssetDirectories: readPathList(parsed.externalAssetDirectories),
+      projectDirectories: readPathList(parsed.projectDirectories),
     };
   } catch (err) {
     console.error('[Pixel Agents] Failed to read config file:', err);

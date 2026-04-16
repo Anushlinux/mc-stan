@@ -127,7 +127,7 @@ export function MissionControlPanel({
         <div className="flex items-start justify-between gap-8">
           <div className="min-w-0">
             <div className="text-sm uppercase text-text-muted">
-              Agent #{session.agentId}
+              {session.displayName ?? `Agent #${session.agentId}`}
               {session.isExternal ? ' · external' : ''}
             </div>
             <div className="mt-3 truncate text-lg text-white">{taskLabel}</div>

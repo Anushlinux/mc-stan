@@ -95,6 +95,7 @@ export function getSessionTaskLabel(
   task: MissionControlTask | undefined,
 ): string {
   if (task?.title) return task.title;
+  if (session.displayName) return session.displayName;
   if (session.lastActionSummary) return session.lastActionSummary;
   if (session.currentTool) return `Using ${session.currentTool}`;
   return 'No assigned task';

@@ -13,6 +13,15 @@ import { safeUpdateState } from './stateUtils.js';
 import { cancelPermissionTimer, cancelWaitingTimer } from './timerManager.js';
 import type { AgentState, PersistedAgent } from './types.js';
 
+export interface CreateManagedAgentOptions {
+  folderPath?: string;
+  displayName?: string;
+  initialPrompt?: string;
+  folderName?: string;
+  orchestrationRunId?: string;
+  workspaceAssignmentId?: string;
+}
+
 export function getProjectDirPath(cwd?: string): string {
   const workspacePath = cwd || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || os.homedir();
   const dirName = workspacePath.replace(/[^a-zA-Z0-9-]/g, '-');
@@ -63,20 +72,22 @@ export async function launchNewTerminal(
   agents: Map<number, AgentState>,
   webview: vscode.Webview | undefined,
   persistAgents: () => void,
-  folderPath?: string,
+  options: CreateManagedAgentOptions = {},
 ): Promise<void> {
   const folders = vscode.workspace.workspaceFolders;
-  const cwd = folderPath || folders?.[0]?.uri.fsPath || os.homedir();
+  const cwd = options.folderPath || folders?.[0]?.uri.fsPath || os.homedir();
   const isMultiRoot = !!(folders && folders.length > 1);
 
   const projectDir = getProjectDirPath(cwd);
 
   const id = nextAgentIdRef.current++;
-  const folderName = isMultiRoot && cwd ? path.basename(cwd) : undefined;
+  const folderName = options.folderName || (isMultiRoot && cwd ? path.basename(cwd) : undefined);
   const agent: AgentState = {
     id,
     // Leave sessionId empty — hookEventHandler will fill it in when SessionStart fires
     sessionId: '',
+    displayName: options.displayName,
+    initialPrompt: options.initialPrompt,
     cwd,
     isExternal: false,
     projectDir,
@@ -90,13 +101,15 @@ export async function launchNewTerminal(
     permissionSent: false,
     hadToolsInTurn: false,
     folderName,
+    orchestrationRunId: options.orchestrationRunId,
+    workspaceAssignmentId: options.workspaceAssignmentId,
     hookDelivered: false,
   };
 
   agents.set(id, agent);
   persistAgents();
   console.log(`[Pixel Agents] Session: Agent ${id} - created for managed runtime`);
-  webview?.postMessage({ type: 'agentCreated', id, folderName });
+  webview?.postMessage({ type: 'agentCreated', id, folderName, displayName: options.displayName });
 }
 
 export function removeAgent(
@@ -125,10 +138,14 @@ export function persistAgents(
     persisted.push({
       id: agent.id,
       sessionId: agent.sessionId,
+      displayName: agent.displayName,
+      initialPrompt: agent.initialPrompt,
       terminalName: agent.terminalRef?.name ?? '',
       isExternal: agent.isExternal || undefined,
       projectDir: agent.projectDir,
       cwd: agent.cwd,
+      orchestrationRunId: agent.orchestrationRunId,
+      workspaceAssignmentId: agent.workspaceAssignmentId,
       folderName: agent.folderName,
     });
   }
@@ -161,6 +178,8 @@ export function restoreAgents(
     const agent: AgentState = {
       id: p.id,
       sessionId: p.sessionId || `session-${p.id}`,
+      displayName: p.displayName,
+      initialPrompt: p.initialPrompt,
       isExternal,
       projectDir: p.projectDir,
       cwd: p.cwd,
@@ -174,6 +193,8 @@ export function restoreAgents(
       permissionSent: false,
       hadToolsInTurn: false,
       folderName: p.folderName,
+      orchestrationRunId: p.orchestrationRunId,
+      workspaceAssignmentId: p.workspaceAssignmentId,
       hookDelivered: false,
     };
 

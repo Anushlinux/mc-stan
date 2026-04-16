@@ -162,6 +162,7 @@ export function AgentInspectorDrawer({
   const statusLabel = getLaunchStatusLabel(session, embeddedTerminal);
   const statusTone = getLaunchTone(session, embeddedTerminal);
   const taskTitle = session ? getSessionTaskLabel(session, task) : 'Session startup in progress';
+  const agentLabel = session?.displayName ?? `Agent #${agentId}`;
   const taskSummary = task?.goal ?? progressLabel;
 
   const taskAction = (status: MissionControlTask['status'], latestUpdate: string) => {
@@ -179,7 +180,7 @@ export function AgentInspectorDrawer({
       <section className="mission-control-hero pixel-panel px-10 py-10">
         <div className="flex flex-wrap items-start justify-between gap-8">
           <div className="min-w-0">
-            <div className="text-sm uppercase text-text-muted">Agent #{agentId}</div>
+            <div className="text-sm uppercase text-text-muted">{agentLabel}</div>
             <div className="mt-3 text-2xl text-white">{taskTitle}</div>
             <div className="mt-3 text-2xs leading-relaxed text-text-muted">{taskSummary}</div>
           </div>
@@ -403,6 +404,19 @@ export function AgentInspectorDrawer({
                           task.expectedArtifacts.map((item) => <div key={item}>- {item}</div>)
                         ) : (
                           <div className="text-text-muted">None provided.</div>
+                        )}
+                      </div>
+                    </div>
+
+                    <div>
+                      <div className="text-2xs uppercase text-text-muted">Owned paths</div>
+                      <div className="mt-3 grid gap-2 text-2xs text-text">
+                        {task.ownedPaths.length > 0 ? (
+                          task.ownedPaths.map((item) => <div key={item}>- {item}</div>)
+                        ) : (
+                          <div className="text-text-muted">
+                            Not limited to explicit path ownership.
+                          </div>
                         )}
                       </div>
                     </div>

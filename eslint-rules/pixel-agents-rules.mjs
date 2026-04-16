@@ -4,7 +4,7 @@
  * Rules:
  *   no-inline-colors  — flag hex/rgb/rgba/hsl/hsla color literals (centralize in constants)
  *   pixel-shadow      — flag box-shadow values not using var(--pixel-shadow) or 2px 2px 0px
- *   pixel-font        — flag font-family values not referencing FS Pixel Sans
+ *   pixel-font        — flag UI font-family values not referencing FS Pixel Sans
  */
 
 const HEX_COLOR = /#[0-9a-fA-F]{3,8}\b/;
@@ -103,11 +103,27 @@ function isFontFamilyProperty(node) {
   return false;
 }
 
+function isXtermTerminalOption(node) {
+  let current = node.parent;
+  while (current) {
+    if (
+      current.type === 'NewExpression' &&
+      current.callee.type === 'Identifier' &&
+      current.callee.name === 'Terminal'
+    ) {
+      return true;
+    }
+    current = current.parent;
+  }
+  return false;
+}
+
 const pixelFont = {
   meta: {
     type: 'suggestion',
     docs: {
-      description: 'Require font-family values to reference FS Pixel Sans.',
+      description:
+        'Require UI font-family values to reference FS Pixel Sans while allowing xterm terminal configs to use monospace fonts.',
     },
     schema: [],
     messages: {
@@ -118,6 +134,7 @@ const pixelFont = {
     return {
       Property(node) {
         if (!isFontFamilyProperty(node)) return;
+        if (isXtermTerminalOption(node)) return;
         const value = node.value;
         if (value.type !== 'Literal' || typeof value.value !== 'string') return;
         if (value.value.includes('FS Pixel Sans')) return;

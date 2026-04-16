@@ -54,6 +54,25 @@ function buildHooks() {
 }
 
 /**
+ * Copy native helper sources to dist/native so the extension can compile them at runtime.
+ */
+function copyNativeSources() {
+  const srcDir = path.join(__dirname, 'native');
+  const dstDir = path.join(__dirname, 'dist', 'native');
+
+  if (!fs.existsSync(srcDir)) {
+    return;
+  }
+
+  if (fs.existsSync(dstDir)) {
+    fs.rmSync(dstDir, { recursive: true });
+  }
+
+  fs.cpSync(srcDir, dstDir, { recursive: true });
+  console.log('✓ Copied native/ → dist/native/');
+}
+
+/**
  * @type {import('esbuild').Plugin}
  */
 const esbuildProblemMatcherPlugin = {
@@ -98,6 +117,7 @@ async function main() {
     // Copy assets and hooks after build
     copyAssets();
     buildHooks();
+    copyNativeSources();
   }
 }
 

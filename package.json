@@ -27,6 +27,17 @@
       {
         "command": "pixel-agents.exportDefaultLayout",
         "title": "Pixel Agents: Export Layout as Default"
+      },
+      {
+        "command": "pixel-agents.toggleVoiceDictation",
+        "title": "Pixel Agents: Toggle Voice Dictation"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "pixel-agents.toggleVoiceDictation",
+        "key": "ctrl+alt+space",
+        "mac": "cmd+ctrl+space"
       }
     ],
     "viewsContainers": {
@@ -64,7 +75,7 @@
     "import-tileset": "tsx scripts/import-tileset-cli.ts",
     "format": "prettier --write \"src/**/*.ts\" \"server/**/*.ts\" \"shared/**/*.ts\" \"webview-ui/src/**/*.{ts,tsx,css}\" \"*.{js,mjs}\" \"webview-ui/*.{js,ts}\"",
     "format:check": "prettier --check \"src/**/*.ts\" \"server/**/*.ts\" \"shared/**/*.ts\" \"webview-ui/src/**/*.{ts,tsx,css}\" \"*.{js,mjs}\" \"webview-ui/*.{js,ts}\"",
-    "test:extension": "node --import tsx --test src/embeddedTerminalManager.test.ts",
+    "test:extension": "node --import tsx --test src/*.test.ts",
     "test:webview": "cd webview-ui && npm test",
     "test:server": "cd server && npm test",
     "test": "npm run test:extension && npm run test:webview && npm run test:server",

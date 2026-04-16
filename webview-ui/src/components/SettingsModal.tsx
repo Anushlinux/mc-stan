@@ -1,5 +1,6 @@
 import { useState } from 'react';
 
+import type { WorkspaceFolder } from '../hooks/useExtensionMessages.js';
 import { isSoundEnabled, setSoundEnabled } from '../notificationSound.js';
 import { vscode } from '../vscodeApi.js';
 import { Button } from './ui/Button.js';
@@ -14,6 +15,7 @@ interface SettingsModalProps {
   onToggleDebugMode: () => void;
   alwaysShowOverlay: boolean;
   onToggleAlwaysShowOverlay: () => void;
+  projectDirectories: WorkspaceFolder[];
   externalAssetDirectories: string[];
   watchAllSessions: boolean;
   onToggleWatchAllSessions: () => void;
@@ -28,6 +30,7 @@ export function SettingsModal({
   onToggleDebugMode,
   alwaysShowOverlay,
   onToggleAlwaysShowOverlay,
+  projectDirectories,
   externalAssetDirectories,
   watchAllSessions,
   onToggleWatchAllSessions,
@@ -62,6 +65,32 @@ export function SettingsModal({
       >
         Import Layout
       </MenuItem>
+      <MenuItem
+        onClick={() => {
+          vscode.postMessage({ type: 'addProjectDirectory' });
+          onClose();
+        }}
+      >
+        Add Project Directory
+      </MenuItem>
+      {projectDirectories.map((dir) => (
+        <div key={dir.path} className="flex items-center justify-between py-4 px-10 gap-8">
+          <span
+            className="text-xs text-text-muted overflow-hidden text-ellipsis whitespace-nowrap"
+            title={dir.path}
+          >
+            {dir.path}
+          </span>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => vscode.postMessage({ type: 'removeProjectDirectory', path: dir.path })}
+            className="shrink-0"
+          >
+            x
+          </Button>
+        </div>
+      ))}
       <MenuItem
         onClick={() => {
           vscode.postMessage({ type: 'addExternalAssetDirectory' });

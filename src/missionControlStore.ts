@@ -15,6 +15,11 @@ import {
   type MissionControlArtifact,
   type MissionControlBlockedReason,
   type MissionControlBriefing,
+  type MissionControlOrchestratorAssignment,
+  type MissionControlOrchestratorProgressEntry,
+  type MissionControlOrchestratorProgressLevel,
+  type MissionControlOrchestratorState,
+  type MissionControlOrchestratorStatus,
   type MissionControlRunEvent,
   type MissionControlSessionStatus,
   type MissionControlSnapshot,
@@ -34,7 +39,32 @@ interface PersistedMissionControlState extends MissionControlSnapshot {
   nextIds: Record<IdKind, number>;
 }
 
+export interface CreateTaskOptions {
+  createdBy?: string;
+  orchestrationRunId?: string;
+  ownedPaths?: string[];
+}
+
+interface UpsertWorkspaceInput {
+  repoRoot: string;
+  branchName?: string;
+  worktreePath: string;
+  status: MissionControlWorkspaceAssignment['status'];
+  assignedSessionId?: string;
+  orchestrationRunId?: string;
+  slot?: number;
+}
+
 const TERMINAL_STATUSES = new Set<MissionControlSessionStatus>(['completed', 'failed', 'stopped']);
+const QUIESCENT_ORCHESTRATOR_SESSION_STATUSES = new Set<MissionControlSessionStatus>([
+  'waiting_input',
+  'blocked',
+  'paused',
+  'completed',
+  'failed',
+  'stopped',
+]);
+const MAX_ORCHESTRATOR_PROGRESS_ENTRIES = 50;
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -93,6 +123,7 @@ function createDefaultState(): PersistedMissionControlState {
     artifacts: [],
     workspaces: [],
     briefings: [],
+    orchestrator: createDefaultOrchestratorState(),
     activeSessionByAgentId: {},
     nextIds: {
       session: 1,
@@ -104,6 +135,25 @@ function createDefaultState(): PersistedMissionControlState {
       event: 1,
     },
   };
+}
+
+function createDefaultOrchestratorState(): MissionControlOrchestratorState {
+  return {
+    status: 'idle',
+    sharedConstraints: [],
+    assignments: [],
+    progressEntries: [],
+    updatedAt: nowIso(),
+  };
+}
+
+function isTransientOrchestratorStatus(status: MissionControlOrchestratorStatus): boolean {
+  return (
+    status === 'planning' ||
+    status === 'provisioning' ||
+    status === 'dispatching' ||
+    status === 'running'
+  );
 }
 
 function runGitCommand(cwd: string, args: string[]): string | undefined {
@@ -234,6 +284,7 @@ export class MissionControlStore {
   constructor(private readonly context: vscode.ExtensionContext) {}
 
   hydrate(agents: Iterable<AgentState>): MissionControlSnapshot {
+    const agentList = [...agents];
     const persisted = this.context.workspaceState.get<PersistedMissionControlState>(
       WORKSPACE_KEY_MISSION_CONTROL,
     );
@@ -241,13 +292,21 @@ export class MissionControlStore {
       this.state = {
         ...createDefaultState(),
         ...persisted,
+        orchestrator: {
+          ...createDefaultOrchestratorState(),
+          ...persisted.orchestrator,
+          sharedConstraints: [...(persisted.orchestrator?.sharedConstraints ?? [])],
+          assignments: [...(persisted.orchestrator?.assignments ?? [])],
+          progressEntries: [...(persisted.orchestrator?.progressEntries ?? [])],
+        },
         nextIds: {
           ...createDefaultState().nextIds,
           ...persisted.nextIds,
         },
       };
     }
-    this.syncAgents(agents);
+    this.recoverOrchestratorAfterReload();
+    this.syncAgents(agentList);
     return this.getSnapshot();
   }
 
@@ -286,6 +345,18 @@ export class MissionControlStore {
       artifacts: [...this.state.artifacts].sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
       workspaces: [...this.state.workspaces].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)),
       briefings: [...this.state.briefings].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)),
+      orchestrator: {
+        ...this.state.orchestrator,
+        sharedConstraints: [...this.state.orchestrator.sharedConstraints],
+        assignments: this.state.orchestrator.assignments.map((assignment) => ({
+          ...assignment,
+          ownedPaths: [...assignment.ownedPaths],
+          acceptanceCriteria: [...assignment.acceptanceCriteria],
+          coordinationNotes: [...assignment.coordinationNotes],
+          dependsOnSlots: [...assignment.dependsOnSlots],
+        })),
+        progressEntries: this.state.orchestrator.progressEntries.map((entry) => ({ ...entry })),
+      },
       activeSessionByAgentId: { ...this.state.activeSessionByAgentId },
     };
   }
@@ -370,7 +441,171 @@ export class MissionControlStore {
     this.emitChange();
   }
 
-  createTask(input: CreateMissionControlTaskInput): MissionControlTask {
+  startOrchestratorRun(prompt: string, extraConstraints: string[] = []): string {
+    const runId = `run-${this.nextId('event')}`;
+    const timestamp = nowIso();
+    this.state.orchestrator = {
+      status: 'planning',
+      activeRunId: runId,
+      startedAt: timestamp,
+      lastPrompt: prompt.trim(),
+      lastPlanSummary: undefined,
+      currentPhaseLabel: 'Preparing Repository',
+      currentPhaseDetail: 'Collecting repository context before planning the split.',
+      sharedConstraints: splitLines(extraConstraints),
+      assignments: [],
+      progressEntries: [
+        this.createOrchestratorProgressEntry(
+          'Master orchestration started. Preparing repository context.',
+          'info',
+          timestamp,
+        ),
+      ],
+      error: undefined,
+      updatedAt: timestamp,
+    };
+    this.appendSystemEvent('orchestrator_started', 'Master orchestrator started planning', {
+      runId,
+    });
+    this.emitChange();
+    return runId;
+  }
+
+  recordOrchestratorPlan(
+    runId: string,
+    planSummary: string,
+    sharedConstraints: string[],
+    assignments: MissionControlOrchestratorAssignment[],
+  ): void {
+    if (this.state.orchestrator.activeRunId !== runId) return;
+    this.state.orchestrator = {
+      ...this.state.orchestrator,
+      status: 'provisioning',
+      lastPlanSummary: planSummary,
+      currentPhaseLabel: 'Provisioning Workspaces',
+      currentPhaseDetail: 'Validated 3-way split. Creating isolated worker worktrees.',
+      sharedConstraints: splitLines(sharedConstraints),
+      assignments: assignments.map((assignment) => ({
+        ...assignment,
+        ownedPaths: splitLines(assignment.ownedPaths),
+        acceptanceCriteria: splitLines(assignment.acceptanceCriteria),
+        coordinationNotes: splitLines(assignment.coordinationNotes),
+        dependsOnSlots: [...assignment.dependsOnSlots].sort((a, b) => a - b),
+      })),
+      error: undefined,
+      updatedAt: nowIso(),
+    };
+    this.pushOrchestratorProgress(
+      'Plan validated. Provisioning isolated worker worktrees.',
+      'success',
+    );
+    this.appendSystemEvent('orchestrator_planned', 'Master orchestrator created a 3-part plan', {
+      runId,
+      assignmentCount: assignments.length,
+    });
+    this.emitChange();
+  }
+
+  recordOrchestratorDispatching(runId: string): void {
+    if (this.state.orchestrator.activeRunId !== runId) return;
+    this.state.orchestrator = {
+      ...this.state.orchestrator,
+      status: 'dispatching',
+      currentPhaseLabel: 'Launching Workers',
+      currentPhaseDetail: 'Dispatching worker prompts into isolated sessions.',
+      error: undefined,
+      updatedAt: nowIso(),
+    };
+    this.pushOrchestratorProgress('Workspaces ready. Launching worker sessions.', 'info');
+    this.emitChange();
+  }
+
+  recordOrchestratorProgress(
+    runId: string,
+    input: {
+      message: string;
+      level?: MissionControlOrchestratorProgressLevel;
+      status?: MissionControlOrchestratorStatus;
+      phaseLabel?: string;
+      phaseDetail?: string;
+    },
+  ): void {
+    if (this.state.orchestrator.activeRunId !== runId) return;
+    this.state.orchestrator = {
+      ...this.state.orchestrator,
+      status: input.status ?? this.state.orchestrator.status,
+      currentPhaseLabel: input.phaseLabel ?? this.state.orchestrator.currentPhaseLabel,
+      currentPhaseDetail: input.phaseDetail ?? input.message,
+      updatedAt: nowIso(),
+    };
+    this.pushOrchestratorProgress(input.message, input.level ?? 'info');
+    this.emitChange();
+  }
+
+  recordOrchestratorAssignmentLaunch(
+    runId: string,
+    slot: number,
+    details: Pick<
+      MissionControlOrchestratorAssignment,
+      'agentId' | 'taskId' | 'workspaceAssignmentId'
+    >,
+  ): void {
+    if (this.state.orchestrator.activeRunId !== runId) return;
+    const nextAssignments = this.state.orchestrator.assignments.map((assignment) =>
+      assignment.slot === slot ? { ...assignment, ...details } : assignment,
+    );
+    const allWorkersLaunched =
+      nextAssignments.length > 0 &&
+      nextAssignments.every((assignment) => typeof assignment.agentId === 'number');
+    this.state.orchestrator = {
+      ...this.state.orchestrator,
+      status: allWorkersLaunched ? 'running' : 'dispatching',
+      currentPhaseLabel: allWorkersLaunched ? 'Workers Running' : 'Launching Workers',
+      currentPhaseDetail: allWorkersLaunched
+        ? 'All worker sessions are live and executing inside isolated worktrees.'
+        : 'Dispatching remaining workers into their isolated worktrees.',
+      assignments: nextAssignments,
+      updatedAt: nowIso(),
+    };
+    this.pushOrchestratorProgress(`Worker ${slot.toString()} launched successfully.`, 'success');
+    this.emitChange();
+  }
+
+  recordOrchestratorFailure(runId: string, error: string): void {
+    if (this.state.orchestrator.activeRunId !== runId) return;
+    this.state.orchestrator = {
+      ...this.state.orchestrator,
+      status: 'failed',
+      currentPhaseDetail: error,
+      error,
+      updatedAt: nowIso(),
+    };
+    this.pushOrchestratorProgress(error, 'error');
+    this.appendSystemEvent('orchestrator_failed', error, { runId });
+    this.emitChange();
+  }
+
+  resetOrchestrator(reason = 'Master orchestrator was reset.'): void {
+    const previousRunId = this.state.orchestrator.activeRunId;
+    const timestamp = nowIso();
+    this.state.orchestrator = {
+      ...createDefaultOrchestratorState(),
+      currentPhaseLabel: 'Reset Complete',
+      currentPhaseDetail: reason,
+      progressEntries: [this.createOrchestratorProgressEntry(reason, 'warning', timestamp)],
+      error: reason,
+      updatedAt: timestamp,
+    };
+    this.appendSystemEvent('orchestrator_reset', reason, {
+      previousRunId,
+    });
+    this.emitChange();
+  }
+
+  createTask(
+    input: CreateMissionControlTaskInput,
+    options: CreateTaskOptions = {},
+  ): MissionControlTask {
     const timestamp = nowIso();
     const title = deriveTaskTitle(input.goal, input.title);
     const briefing: MissionControlBriefing = {
@@ -394,10 +629,12 @@ export class MissionControlStore {
       expectedArtifacts: splitLines(input.expectedArtifacts),
       acceptanceCriteria: splitLines(input.acceptanceCriteria),
       constraints: splitLines(input.constraints),
+      ownedPaths: splitLines(options.ownedPaths),
       briefingId: briefing.id,
+      orchestrationRunId: options.orchestrationRunId,
       createdAt: timestamp,
       updatedAt: timestamp,
-      createdBy: 'operator',
+      createdBy: options.createdBy ?? 'operator',
       latestUpdate: 'Task created',
     };
 
@@ -415,8 +652,9 @@ export class MissionControlStore {
   submitTask(
     input: CreateMissionControlTaskInput,
     agent: AgentState,
+    options: CreateTaskOptions = {},
   ): MissionControlTask | undefined {
-    const task = this.createTask(input);
+    const task = this.createTask(input, options);
     return this.assignTask(task.id, agent);
   }
 
@@ -938,9 +1176,11 @@ export class MissionControlStore {
         current.sessionId = agent.sessionId;
       }
       current.provider = agent.providerId ?? current.provider;
+      current.displayName = agent.displayName ?? current.displayName;
       current.isExternal = agent.isExternal;
       current.cwd = agent.cwd ?? current.cwd;
       current.projectDir = agent.projectDir;
+      current.workspaceAssignmentId = agent.workspaceAssignmentId ?? current.workspaceAssignmentId;
       current.updatedAt = nowIso();
       return current;
     }
@@ -954,6 +1194,7 @@ export class MissionControlStore {
       id: this.nextId('session'),
       agentId: agent.id,
       provider: agent.providerId ?? 'codex',
+      displayName: agent.displayName,
       sessionId: trimToUndefined(agent.sessionId),
       isExternal: agent.isExternal,
       status: agent.isWaiting ? 'waiting_input' : 'starting',
@@ -990,6 +1231,7 @@ export class MissionControlStore {
       existing.branchName = snapshot.branchName;
       existing.assignedSessionId = assignedSessionId;
       existing.status = 'ready';
+      existing.orchestrationRunId = agent.orchestrationRunId ?? existing.orchestrationRunId;
       existing.updatedAt = updatedAt;
       return existing;
     }
@@ -1001,9 +1243,44 @@ export class MissionControlStore {
       worktreePath: snapshot.worktreePath,
       status: 'ready',
       assignedSessionId,
+      orchestrationRunId: agent.orchestrationRunId,
       updatedAt,
     };
     this.state.workspaces.push(workspace);
+    return workspace;
+  }
+
+  upsertWorkspaceAssignment(input: UpsertWorkspaceInput): MissionControlWorkspaceAssignment {
+    const existing = this.state.workspaces.find(
+      (workspace) => workspace.worktreePath === input.worktreePath,
+    );
+    const updatedAt = nowIso();
+    if (existing) {
+      existing.repoRoot = input.repoRoot;
+      existing.branchName = input.branchName;
+      existing.worktreePath = input.worktreePath;
+      existing.status = input.status;
+      existing.assignedSessionId = input.assignedSessionId;
+      existing.orchestrationRunId = input.orchestrationRunId;
+      existing.slot = input.slot;
+      existing.updatedAt = updatedAt;
+      this.emitChange();
+      return existing;
+    }
+
+    const workspace: MissionControlWorkspaceAssignment = {
+      id: this.nextId('workspace'),
+      repoRoot: input.repoRoot,
+      branchName: input.branchName,
+      worktreePath: input.worktreePath,
+      status: input.status,
+      assignedSessionId: input.assignedSessionId,
+      orchestrationRunId: input.orchestrationRunId,
+      slot: input.slot,
+      updatedAt,
+    };
+    this.state.workspaces.push(workspace);
+    this.emitChange();
     return workspace;
   }
 
@@ -1094,6 +1371,7 @@ export class MissionControlStore {
   }
 
   private emitChange(): void {
+    this.syncOrchestratorWorkerLifecycle();
     this.state.generatedAt = nowIso();
     for (const listener of this.listeners) {
       listener(this.getSnapshot());
@@ -1105,5 +1383,110 @@ export class MissionControlStore {
       this.persistTimer = null;
       void safeUpdateState(this.context.workspaceState, WORKSPACE_KEY_MISSION_CONTROL, this.state);
     }, 100);
+  }
+
+  private syncOrchestratorWorkerLifecycle(): void {
+    if (this.state.orchestrator.status !== 'running') {
+      return;
+    }
+
+    const launchedAssignments = this.state.orchestrator.assignments.filter(
+      (assignment) => typeof assignment.agentId === 'number',
+    );
+    if (
+      launchedAssignments.length === 0 ||
+      launchedAssignments.length !== this.state.orchestrator.assignments.length
+    ) {
+      return;
+    }
+
+    const relatedSessions = launchedAssignments.map((assignment) =>
+      this.state.sessions.find((session) => session.agentId === assignment.agentId),
+    );
+    if (relatedSessions.some((session) => !session)) {
+      return;
+    }
+
+    const allWorkersQuiescent = relatedSessions.every((session) =>
+      QUIESCENT_ORCHESTRATOR_SESSION_STATUSES.has(session!.status),
+    );
+    if (!allWorkersQuiescent) {
+      return;
+    }
+
+    const timestamp = nowIso();
+    this.state.orchestrator = {
+      ...this.state.orchestrator,
+      status: 'completed',
+      currentPhaseLabel: 'Awaiting Review',
+      currentPhaseDetail:
+        'All workers are idle. Review their isolated changes before applying them to the main checkout.',
+      updatedAt: timestamp,
+    };
+    this.pushOrchestratorProgress(
+      'All workers are idle. Team review is ready.',
+      'success',
+      timestamp,
+    );
+    this.appendSystemEvent(
+      'orchestrator_review_ready',
+      'All worker sessions are idle and ready for review',
+      {
+        runId: this.state.orchestrator.activeRunId,
+        assignmentCount: launchedAssignments.length,
+      },
+    );
+  }
+
+  private recoverOrchestratorAfterReload(): void {
+    if (!isTransientOrchestratorStatus(this.state.orchestrator.status)) {
+      return;
+    }
+
+    const recoveredStatus = this.state.orchestrator.status;
+    const recoveredRunId = this.state.orchestrator.activeRunId;
+    const timestamp = nowIso();
+    this.state.orchestrator = {
+      ...this.state.orchestrator,
+      status: 'failed',
+      currentPhaseDetail: `Recovered stale state from ${recoveredStatus}.`,
+      error: `Previous orchestration run was interrupted while ${recoveredStatus}. Start a new run.`,
+      updatedAt: timestamp,
+    };
+    this.pushOrchestratorProgress(
+      `Recovered stale orchestrator state from ${recoveredStatus}.`,
+      'warning',
+      timestamp,
+    );
+    this.appendSystemEvent(
+      'orchestrator_recovered',
+      `Recovered stale orchestrator state from ${recoveredStatus}`,
+      { runId: recoveredRunId, recoveredStatus },
+    );
+    this.emitChange();
+  }
+
+  private createOrchestratorProgressEntry(
+    message: string,
+    level: MissionControlOrchestratorProgressLevel,
+    timestamp = nowIso(),
+  ): MissionControlOrchestratorProgressEntry {
+    return {
+      id: `progress-${this.nextId('event')}`,
+      timestamp,
+      level,
+      message,
+    };
+  }
+
+  private pushOrchestratorProgress(
+    message: string,
+    level: MissionControlOrchestratorProgressLevel,
+    timestamp = nowIso(),
+  ): void {
+    this.state.orchestrator.progressEntries = [
+      ...this.state.orchestrator.progressEntries,
+      this.createOrchestratorProgressEntry(message, level, timestamp),
+    ].slice(-MAX_ORCHESTRATOR_PROGRESS_ENTRIES);
   }
 }
