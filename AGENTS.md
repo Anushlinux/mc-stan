@@ -26,6 +26,7 @@
 - Extension entry and lifecycle: [src/extension.ts](src/extension.ts)
 - Main orchestration surface: [src/PixelAgentsViewProvider.ts](src/PixelAgentsViewProvider.ts)
 - Terminal launch, persistence, restore, agent creation/removal: [src/agentManager.ts](src/agentManager.ts)
+- Hidden native terminal bridge for embedded interaction on supported platforms: [src/nativeTerminalManager.ts](src/nativeTerminalManager.ts)
 - Transcript polling, adoption, `/clear` handling, external session scanning: [src/fileWatcher.ts](src/fileWatcher.ts)
 - JSONL parsing and activity/status updates: [src/transcriptParser.ts](src/transcriptParser.ts)
 - Shared extension agent types: [src/types.ts](src/types.ts)
@@ -51,6 +52,7 @@
 - Before changing behavior, inspect the implementation files that currently own it instead of inferring from old docs.
 - For extension lifecycle, panel behavior, asset loading, settings, and command wiring, start with [src/extension.ts](src/extension.ts) and [src/PixelAgentsViewProvider.ts](src/PixelAgentsViewProvider.ts).
 - For spawning agents, terminal/session mapping, persistence, and restore flows, start with [src/agentManager.ts](src/agentManager.ts) and [src/types.ts](src/types.ts).
+- For hidden terminal bridging and embedded terminal interaction on supported platforms, inspect [src/nativeTerminalManager.ts](src/nativeTerminalManager.ts), [src/embeddedTerminalManager.ts](src/embeddedTerminalManager.ts), and [src/PixelAgentsViewProvider.ts](src/PixelAgentsViewProvider.ts).
 - For transcript-driven state changes, scan/adoption behavior, and timer interactions, start with [src/fileWatcher.ts](src/fileWatcher.ts), [src/transcriptParser.ts](src/transcriptParser.ts), and [src/timerManager.ts](src/timerManager.ts).
 - For hook protocol, server auth/discovery, and event routing, start with [server/src/server.ts](server/src/server.ts), [server/src/hookEventHandler.ts](server/src/hookEventHandler.ts), and [server/src/constants.ts](server/src/constants.ts).
 - For Claude-specific hook payloads, launch commands, session-dir resolution, and tool-status formatting, start with [server/src/providers/hook/claude/claude.ts](server/src/providers/hook/claude/claude.ts).

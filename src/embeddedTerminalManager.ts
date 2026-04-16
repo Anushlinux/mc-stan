@@ -1,11 +1,16 @@
-import type { EmbeddedTerminalSnapshot } from '../shared/embeddedTerminal.js';
+import * as nodePty from 'node-pty';
+
+import type {
+  EmbeddedTerminalSnapshot,
+  TerminalSnapshotBackend,
+} from '../shared/embeddedTerminal.js';
 
 const DEFAULT_COLS = 120;
 const DEFAULT_ROWS = 32;
 const MAX_BUFFER_CHARS = 200_000;
 
 interface EmbeddedSessionState {
-  pty: PtyProcess;
+  pty: nodePty.IPty;
   buffer: string;
   status: EmbeddedTerminalSnapshot['status'];
   cols: number;
@@ -38,48 +43,8 @@ interface EmbeddedTerminalManagerCallbacks {
   ) => void;
 }
 
-interface PtyExitEvent {
-  exitCode: number;
-  signal?: number;
-}
-
-interface PtyProcess {
-  write(data: string): void;
-  resize(cols: number, rows: number): void;
-  kill(signal?: string): void;
-  onData(listener: (data: string) => void): void;
-  onExit(listener: (event: PtyExitEvent) => void): void;
-}
-
-interface PtyModule {
-  spawn(
-    file: string,
-    args?: string[],
-    options?: {
-      name?: string;
-      cols?: number;
-      rows?: number;
-      cwd?: string;
-      env?: NodeJS.ProcessEnv;
-    },
-  ): PtyProcess;
-}
-
-let cachedNodePty: PtyModule | null | undefined;
-
-function loadNodePty(): PtyModule | null {
-  if (cachedNodePty !== undefined) {
-    return cachedNodePty;
-  }
-
-  try {
-    const runtimeRequire = eval('require') as NodeRequire;
-    cachedNodePty = runtimeRequire('node-pty') as PtyModule;
-  } catch {
-    cachedNodePty = null;
-  }
-
-  return cachedNodePty;
+interface EmbeddedTerminalManagerDependencies {
+  nodePtyModule?: Pick<typeof nodePty, 'spawn'>;
 }
 
 function trimBuffer(buffer: string): { buffer: string; truncated: boolean } {
@@ -122,6 +87,7 @@ export function createInspectOnlyTerminalSnapshot(
   cols = DEFAULT_COLS,
   rows = DEFAULT_ROWS,
   status: EmbeddedTerminalSnapshot['status'] = 'unavailable',
+  backend?: TerminalSnapshotBackend,
 ): EmbeddedTerminalSnapshot {
   return {
     mode: 'inspect_only',
@@ -130,19 +96,22 @@ export function createInspectOnlyTerminalSnapshot(
     buffer: '',
     cols,
     rows,
+    backend,
     reason,
   };
 }
 
-export function isEmbeddedTerminalAvailable(): boolean {
-  return loadNodePty() !== null;
-}
-
 export class EmbeddedTerminalManager {
+  private readonly nodePtyModule: Pick<typeof nodePty, 'spawn'>;
   private liveSessions = new Map<number, EmbeddedSessionState>();
   private snapshots = new Map<number, EmbeddedTerminalSnapshot>();
 
-  constructor(private readonly callbacks: EmbeddedTerminalManagerCallbacks) {}
+  constructor(
+    private readonly callbacks: EmbeddedTerminalManagerCallbacks,
+    dependencies?: EmbeddedTerminalManagerDependencies,
+  ) {
+    this.nodePtyModule = dependencies?.nodePtyModule ?? nodePty;
+  }
 
   launchSession(options: LaunchEmbeddedSessionOptions): EmbeddedTerminalSnapshot {
     this.disposeSession(options.agentId);
@@ -150,26 +119,9 @@ export class EmbeddedTerminalManager {
     const cols = options.cols ?? DEFAULT_COLS;
     const rows = options.rows ?? DEFAULT_ROWS;
 
-    const nodePty = loadNodePty();
-    if (!nodePty) {
-      const snapshot: EmbeddedTerminalSnapshot = {
-        mode: 'embedded',
-        status: 'failed',
-        canInteract: false,
-        buffer: '',
-        cols,
-        rows,
-        reason:
-          'Embedded terminal is unavailable because this VS Code extension runs on Node/Electron and the optional "node-pty" package is not installed. Install it in the repo root with `npm install node-pty --save-optional`, then reload the extension. Until then, the rest of Pixel Agents will continue to work without embedded terminal control.',
-      };
-      this.snapshots.set(options.agentId, snapshot);
-      this.callbacks.onSnapshot(options.agentId, snapshot);
-      return snapshot;
-    }
-
-    let pty: PtyProcess;
+    let pty: nodePty.IPty;
     try {
-      pty = nodePty.spawn(options.command, options.args ?? [], {
+      pty = this.nodePtyModule.spawn(options.command, options.args ?? [], {
         name: 'xterm-256color',
         cols,
         rows,
@@ -195,6 +147,9 @@ export class EmbeddedTerminalManager {
       };
       this.snapshots.set(options.agentId, snapshot);
       this.callbacks.onSnapshot(options.agentId, snapshot);
+      this.callbacks.onExit(options.agentId, {
+        reason: snapshot.reason ?? 'Failed to launch Codex',
+      });
       return snapshot;
     }
 
@@ -210,7 +165,7 @@ export class EmbeddedTerminalManager {
     this.liveSessions.set(options.agentId, state);
     this.emitSnapshot(options.agentId, state);
 
-    pty.onData((data: string) => {
+    pty.onData((data) => {
       if (!data) return;
 
       state.status = 'running';
@@ -227,7 +182,7 @@ export class EmbeddedTerminalManager {
       this.callbacks.onData(options.agentId, data);
     });
 
-    pty.onExit(({ exitCode, signal }: { exitCode: number; signal?: number }) => {
+    pty.onExit(({ exitCode, signal }) => {
       const session = this.liveSessions.get(options.agentId);
       if (!session) return;
 

@@ -7,19 +7,26 @@ const DEFAULT_ROWS = 32;
 const MAX_BUFFER_CHARS = 200_000;
 const SHELL_INTEGRATION_TIMEOUT_MS = 8_000;
 
-interface WindowsNativeSessionState {
+interface NativeSessionState {
   terminal: vscode.Terminal;
   buffer: string;
   status: EmbeddedTerminalSnapshot['status'];
   cols: number;
   rows: number;
+  expectedCommandLine: string;
   execution?: vscode.TerminalShellExecution;
   exitCode?: number;
   reason?: string;
   suppressExitCallback: boolean;
 }
 
-interface LaunchWindowsNativeSessionOptions {
+interface PendingExecutionStart {
+  timer: ReturnType<typeof setTimeout>;
+  resolve: (execution: vscode.TerminalShellExecution) => void;
+  reject: (error: Error) => void;
+}
+
+interface LaunchNativeSessionOptions {
   agentId: number;
   cwd: string;
   name: string;
@@ -29,7 +36,7 @@ interface LaunchWindowsNativeSessionOptions {
   rows?: number;
 }
 
-interface WindowsNativeTerminalManagerCallbacks {
+interface NativeTerminalManagerCallbacks {
   onData: (agentId: number, data: string) => void;
   onSnapshot: (agentId: number, snapshot: EmbeddedTerminalSnapshot) => void;
   onExit: (
@@ -69,14 +76,49 @@ function buildReasonForExit(
   return 'Session ended';
 }
 
-export class WindowsNativeTerminalManager implements vscode.Disposable {
-  private liveSessions = new Map<number, WindowsNativeSessionState>();
+function quoteCommandPart(part: string): string {
+  if (!/[\s"'\\$`!]/.test(part)) {
+    return part;
+  }
+
+  return `"${part.replace(/["\\$`]/g, '\\$&')}"`;
+}
+
+function buildExpectedCommandLine(command: string, args: string[]): string {
+  return [command, ...args].map(quoteCommandPart).join(' ');
+}
+
+function normalizeCommandLine(commandLine: string): string {
+  return commandLine.replace(/\s+/g, ' ').trim();
+}
+
+function matchesExpectedCommandLine(expected: string, actual: string): boolean {
+  const normalizedExpected = normalizeCommandLine(expected);
+  const normalizedActual = normalizeCommandLine(actual);
+
+  if (!normalizedExpected || !normalizedActual) {
+    return false;
+  }
+
+  if (normalizedExpected === normalizedActual) {
+    return true;
+  }
+
+  const unquotedExpected = normalizedExpected.replace(/^['"]|['"]$/g, '');
+  const unquotedActual = normalizedActual.replace(/^['"]|['"]$/g, '');
+
+  return unquotedExpected === unquotedActual;
+}
+
+export class NativeTerminalManager implements vscode.Disposable {
+  private liveSessions = new Map<number, NativeSessionState>();
   private snapshots = new Map<number, EmbeddedTerminalSnapshot>();
   private terminalToAgentId = new Map<vscode.Terminal, number>();
   private executionToAgentId = new Map<vscode.TerminalShellExecution, number>();
+  private pendingExecutionStarts = new Map<number, PendingExecutionStart>();
   private readonly disposables: vscode.Disposable[] = [];
 
-  constructor(private readonly callbacks: WindowsNativeTerminalManagerCallbacks) {
+  constructor(private readonly callbacks: NativeTerminalManagerCallbacks) {
     this.disposables.push(
       vscode.window.onDidStartTerminalShellExecution((event) => {
         const agentId = this.terminalToAgentId.get(event.terminal);
@@ -84,8 +126,17 @@ export class WindowsNativeTerminalManager implements vscode.Disposable {
 
         const session = this.liveSessions.get(agentId);
         if (!session) return;
+        if (
+          !matchesExpectedCommandLine(
+            session.expectedCommandLine,
+            event.execution.commandLine.value,
+          )
+        ) {
+          return;
+        }
 
         this.attachExecution(agentId, session, event.execution);
+        this.resolvePendingExecutionStart(agentId, event.execution);
       }),
     );
 
@@ -121,7 +172,7 @@ export class WindowsNativeTerminalManager implements vscode.Disposable {
     );
   }
 
-  launchSession(options: LaunchWindowsNativeSessionOptions): {
+  launchSession(options: LaunchNativeSessionOptions): {
     terminal: vscode.Terminal;
     snapshot: EmbeddedTerminalSnapshot;
   } {
@@ -129,18 +180,20 @@ export class WindowsNativeTerminalManager implements vscode.Disposable {
 
     const cols = options.cols ?? DEFAULT_COLS;
     const rows = options.rows ?? DEFAULT_ROWS;
+    const expectedCommandLine = buildExpectedCommandLine(options.command, options.args ?? []);
     const terminal = vscode.window.createTerminal({
       name: options.name,
       cwd: options.cwd,
       hideFromUser: true,
     });
 
-    const state: WindowsNativeSessionState = {
+    const state: NativeSessionState = {
       terminal,
       buffer: '',
       status: 'starting',
       cols,
       rows,
+      expectedCommandLine,
       suppressExitCallback: false,
     };
 
@@ -205,6 +258,7 @@ export class WindowsNativeTerminalManager implements vscode.Disposable {
 
   disposeSession(agentId: number): void {
     const session = this.liveSessions.get(agentId);
+    this.rejectPendingExecutionStart(agentId, 'The hidden terminal bridge was closed.');
     if (!session) {
       this.snapshots.delete(agentId);
       return;
@@ -221,7 +275,7 @@ export class WindowsNativeTerminalManager implements vscode.Disposable {
     try {
       session.terminal.dispose();
     } catch {
-      // Ignore teardown errors while closing the hidden native terminal.
+      // Ignore teardown errors while closing the hidden terminal bridge.
     }
   }
 
@@ -232,6 +286,9 @@ export class WindowsNativeTerminalManager implements vscode.Disposable {
     this.snapshots.clear();
     this.terminalToAgentId.clear();
     this.executionToAgentId.clear();
+    for (const agentId of [...this.pendingExecutionStarts.keys()]) {
+      this.rejectPendingExecutionStart(agentId, 'The hidden terminal bridge was closed.');
+    }
   }
 
   dispose(): void {
@@ -250,6 +307,13 @@ export class WindowsNativeTerminalManager implements vscode.Disposable {
         return;
       }
 
+      if (process.platform === 'darwin') {
+        const executionStart = this.waitForExpectedExecutionStart(agentId);
+        currentSession.terminal.sendText(currentSession.expectedCommandLine, true);
+        await executionStart;
+        return;
+      }
+
       const execution = shellIntegration.executeCommand(command, args);
       this.attachExecution(agentId, currentSession, execution);
     } catch (error) {
@@ -262,7 +326,7 @@ export class WindowsNativeTerminalManager implements vscode.Disposable {
       currentSession.reason =
         error instanceof Error
           ? error.message
-          : 'Failed to start Codex in the hidden Windows terminal.';
+          : 'Failed to start Codex in the hidden terminal bridge.';
       this.emitSnapshot(agentId, currentSession);
 
       if (currentSession.suppressExitCallback) {
@@ -294,14 +358,14 @@ export class WindowsNativeTerminalManager implements vscode.Disposable {
       const closeDisposable = vscode.window.onDidCloseTerminal((closed) => {
         if (closed !== terminal) return;
         cleanup();
-        reject(new Error('The hidden Windows terminal closed before shell integration activated.'));
+        reject(new Error('The hidden terminal bridge closed before shell integration activated.'));
       });
 
       const timer = setTimeout(() => {
         cleanup();
         reject(
           new Error(
-            'VS Code shell integration did not activate for the hidden Windows terminal. Use a shell with shell integration enabled, then reopen Pixel Agents.',
+            'VS Code shell integration did not activate for the hidden terminal bridge. Use a shell with shell integration enabled, then reopen Pixel Agents.',
           ),
         );
       }, SHELL_INTEGRATION_TIMEOUT_MS);
@@ -316,7 +380,7 @@ export class WindowsNativeTerminalManager implements vscode.Disposable {
 
   private attachExecution(
     agentId: number,
-    session: WindowsNativeSessionState,
+    session: NativeSessionState,
     execution: vscode.TerminalShellExecution,
   ): void {
     if (session.execution === execution) {
@@ -324,8 +388,54 @@ export class WindowsNativeTerminalManager implements vscode.Disposable {
     }
 
     session.execution = execution;
+    session.expectedCommandLine = execution.commandLine.value;
     this.executionToAgentId.set(execution, agentId);
     void this.readExecution(agentId, execution);
+  }
+
+  private waitForExpectedExecutionStart(agentId: number): Promise<vscode.TerminalShellExecution> {
+    this.rejectPendingExecutionStart(
+      agentId,
+      'Timed out while waiting for the command to start in the hidden terminal bridge.',
+    );
+
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pendingExecutionStarts.delete(agentId);
+        reject(
+          new Error(
+            'Timed out while waiting for the command to start in the hidden terminal bridge.',
+          ),
+        );
+      }, SHELL_INTEGRATION_TIMEOUT_MS);
+
+      this.pendingExecutionStarts.set(agentId, {
+        timer,
+        resolve,
+        reject,
+      });
+    });
+  }
+
+  private resolvePendingExecutionStart(
+    agentId: number,
+    execution: vscode.TerminalShellExecution,
+  ): void {
+    const pending = this.pendingExecutionStarts.get(agentId);
+    if (!pending) return;
+
+    clearTimeout(pending.timer);
+    this.pendingExecutionStarts.delete(agentId);
+    pending.resolve(execution);
+  }
+
+  private rejectPendingExecutionStart(agentId: number, reason: string): void {
+    const pending = this.pendingExecutionStarts.get(agentId);
+    if (!pending) return;
+
+    clearTimeout(pending.timer);
+    this.pendingExecutionStarts.delete(agentId);
+    pending.reject(new Error(reason));
   }
 
   private async readExecution(
@@ -357,13 +467,13 @@ export class WindowsNativeTerminalManager implements vscode.Disposable {
     }
   }
 
-  private emitSnapshot(agentId: number, session: WindowsNativeSessionState): void {
+  private emitSnapshot(agentId: number, session: NativeSessionState): void {
     const snapshot = this.toSnapshot(session);
     this.snapshots.set(agentId, snapshot);
     this.callbacks.onSnapshot(agentId, snapshot);
   }
 
-  private toSnapshot(session: WindowsNativeSessionState): EmbeddedTerminalSnapshot {
+  private toSnapshot(session: NativeSessionState): EmbeddedTerminalSnapshot {
     return {
       mode: 'embedded',
       status: session.status,
@@ -371,6 +481,7 @@ export class WindowsNativeTerminalManager implements vscode.Disposable {
       buffer: session.buffer,
       cols: session.cols,
       rows: session.rows,
+      backend: 'native_terminal',
       exitCode: session.exitCode,
       reason: session.reason,
     };

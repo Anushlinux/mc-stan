@@ -2,6 +2,10 @@
 .vscode-test/**
 out/**
 **/node_modules/**
+!node_modules/
+node_modules/*
+!node_modules/node-pty/
+!node_modules/node-pty/**
 src/**
 webview-ui/**
 scripts/**

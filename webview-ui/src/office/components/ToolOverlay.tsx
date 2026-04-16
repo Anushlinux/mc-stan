@@ -136,6 +136,7 @@ export function ToolOverlay({
 
   const selectedId = officeState.selectedAgentId;
   const hoveredId = officeState.hoveredAgentId;
+  const overlayViewportPadding = 20;
 
   // All character IDs
   const allIds = [...agents, ...subagentCharacters.map((s) => s.id)];
@@ -149,7 +150,9 @@ export function ToolOverlay({
         const isSelected = selectedId === id;
         const isHovered = hoveredId === id;
         const isSub = ch.isSubagent;
-        const isExpanded = isSelected || isHovered;
+        const isHoveredOnly = isHovered && !isSelected;
+        const isExpanded = isSelected || isHoveredOnly;
+        const showExpandedMetadata = isSelected;
         const session = isSub ? undefined : getSessionForAgent(id, missionControl);
         const task = getTaskForSession(session, missionControl);
         const shouldPinOverlay =
@@ -170,6 +173,21 @@ export function ToolOverlay({
         const screenX = (deviceOffsetX + ch.x * zoom) / dpr;
         const screenY =
           (deviceOffsetY + (ch.y + sittingOffset - TOOL_OVERLAY_VERTICAL_OFFSET) * zoom) / dpr;
+        const prefersRightSide = screenX < rect.width * 0.6;
+        const hoverAnchorOffsetX = isHoveredOnly ? (prefersRightSide ? 58 : -58) : 0;
+        const estimatedOverlayWidth = isSelected ? 260 : isHoveredOnly ? 188 : 200;
+        const clampedLeft = Math.min(
+          rect.width - overlayViewportPadding - estimatedOverlayWidth / 2,
+          Math.max(
+            overlayViewportPadding + estimatedOverlayWidth / 2,
+            screenX + hoverAnchorOffsetX,
+          ),
+        );
+        const overlayTop = isSelected
+          ? screenY - (ch.folderName ? 44 : 40)
+          : isHoveredOnly
+            ? screenY - 18
+            : screenY - (ch.folderName ? 36 : 32);
 
         // Get activity text
         const subHasPermission = isSub && ch.bubbleType === 'permission';
@@ -221,8 +239,8 @@ export function ToolOverlay({
             key={id}
             className="absolute flex flex-col items-center -translate-x-1/2"
             style={{
-              left: screenX,
-              top: screenY - (ch.folderName ? (isExpanded ? 44 : 36) : isExpanded ? 40 : 32),
+              left: clampedLeft,
+              top: overlayTop,
               pointerEvents: isSelected ? 'auto' : 'none',
               opacity:
                 alwaysShowOverlay && !isSelected && !isHovered && !shouldPinOverlay
@@ -235,20 +253,26 @@ export function ToolOverlay({
           >
             <div
               className={`pixel-panel border-border bg-bg/92 ${
-                isExpanded ? 'max-w-[260px] px-8 pb-6 pt-5' : 'max-w-[200px] px-7 pb-4 pt-4'
+                isSelected
+                  ? 'max-w-[260px] px-8 pb-6 pt-5'
+                  : isHoveredOnly
+                    ? 'max-w-[188px] px-6 pb-4 pt-4'
+                    : 'max-w-[200px] px-7 pb-4 pt-4'
               }`}
             >
-              <div className="flex items-start gap-5 min-w-0 flex-1">
+              <div
+                className={`flex items-start min-w-0 flex-1 ${isHoveredOnly ? 'gap-4' : 'gap-5'}`}
+              >
                 {dotColor && (
                   <span
                     className={`mt-1 shrink-0 rounded-full ${
-                      isExpanded ? 'h-6 w-6' : 'h-5 w-5'
+                      isSelected ? 'h-6 w-6' : 'h-5 w-5'
                     } ${isActive && !hasPermission ? 'pixel-pulse' : ''}`}
                     style={{ background: dotColor }}
                   />
                 )}
                 <div className="flex flex-col gap-2 overflow-hidden min-w-0">
-                  {!isSub && session && isExpanded && (
+                  {!isSub && session && showExpandedMetadata && (
                     <span
                       className={`border px-4 py-1 text-2xs uppercase leading-none w-fit ${statusTone}`}
                     >
@@ -258,7 +282,13 @@ export function ToolOverlay({
                   <span
                     className="overflow-hidden text-ellipsis block leading-none text-white"
                     style={{
-                      fontSize: isSub ? '20px' : isExpanded ? '22px' : '20px',
+                      fontSize: isSub
+                        ? '20px'
+                        : isSelected
+                          ? '22px'
+                          : isHoveredOnly
+                            ? '19px'
+                            : '20px',
                       fontStyle: isSub ? 'italic' : undefined,
                     }}
                   >
@@ -269,7 +299,7 @@ export function ToolOverlay({
                       {activityText}
                     </span>
                   )}
-                  {!isSub && session && isExpanded && (
+                  {!isSub && session && showExpandedMetadata && (
                     <div className="flex flex-wrap gap-3 text-2xs text-text-muted">
                       <span className="border border-border px-4 py-1">
                         {formatTokenUsageSummary(session.tokenUsage)}

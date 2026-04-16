@@ -12,10 +12,23 @@ interface EmbeddedTerminalPaneProps {
   onToggleCollapse?: () => void;
 }
 
+function getBackendLabel(terminal: EmbeddedTerminalState | undefined): string | null {
+  if (!terminal?.backend) return null;
+  if (terminal.backend === 'native_terminal') return 'native bridge';
+  if (terminal.backend === 'vscode_terminal') return 'VS Code terminal';
+  return terminal.backend;
+}
+
 function getStatusLabel(terminal: EmbeddedTerminalState | undefined): string {
   if (!terminal) return 'Waiting for session';
-  if (terminal.status === 'starting') return 'Launching Codex';
-  if (terminal.status === 'running') return terminal.canInteract ? 'Live session' : 'Read only';
+  const backendLabel = getBackendLabel(terminal);
+  if (terminal.status === 'starting') {
+    return backendLabel ? `Launching Codex via ${backendLabel}` : 'Launching Codex';
+  }
+  if (terminal.status === 'running') {
+    const baseLabel = terminal.canInteract ? 'Live session' : 'Read only';
+    return backendLabel ? `${baseLabel} (${backendLabel})` : baseLabel;
+  }
   if (terminal.status === 'failed') return terminal.reason ?? 'Agent failed to start';
   if (terminal.status === 'exited') return terminal.reason ?? 'Session ended';
   return terminal.reason ?? 'Interactive session unavailable';

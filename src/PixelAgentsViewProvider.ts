@@ -15,7 +15,6 @@ import type { EmbeddedTerminalSnapshot } from '../shared/embeddedTerminal.js';
 import type { MissionControlTask } from '../shared/missionControl.js';
 import {
   getProjectDirPath,
-  launchAgentInTerminal,
   launchNewTerminal,
   persistAgents,
   removeAgent,
@@ -54,14 +53,13 @@ import {
 import {
   createInspectOnlyTerminalSnapshot,
   EmbeddedTerminalManager,
-  isEmbeddedTerminalAvailable,
 } from './embeddedTerminalManager.js';
 import type { LayoutWatcher } from './layoutPersistence.js';
 import { readLayoutFromFile, watchLayoutFile, writeLayoutToFile } from './layoutPersistence.js';
 import { MissionControlStore } from './missionControlStore.js';
+import { NativeTerminalManager } from './nativeTerminalManager.js';
 import { safeUpdateState } from './stateUtils.js';
 import type { AgentState } from './types.js';
-import { WindowsNativeTerminalManager } from './windowsNativeTerminalManager.js';
 
 export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
   nextAgentId = { current: 1 };
@@ -84,7 +82,7 @@ export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
   private pixelAgentsServer: PixelAgentsServer | null = null;
   private hookEventHandler: HookEventHandler | null = null;
   private embeddedTerminalManager: EmbeddedTerminalManager;
-  private windowsNativeTerminalManager: WindowsNativeTerminalManager;
+  private nativeTerminalManager: NativeTerminalManager;
   private missionControlStore: MissionControlStore;
   private missionControlUnsubscribe: (() => void) | null = null;
 
@@ -100,15 +98,18 @@ export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
         const agent = this.agents.get(agentId);
         if (!agent) return;
 
-        if (!agent.sessionId) {
-          this.handleAgentLaunchFailure(agentId, details.reason);
+        if (this.shouldTreatManagedExitAsLaunchFailure(agent, details.reason)) {
+          this.missionControlStore.recordAgentLaunchFailure(agent, details.reason);
+          void vscode.window.showErrorMessage(
+            `Mission Control: Agent #${agentId} failed to start. ${details.reason}`,
+          );
           return;
         }
 
         this.removeManagedAgent(agentId, details.reason);
       },
     });
-    this.windowsNativeTerminalManager = new WindowsNativeTerminalManager({
+    this.nativeTerminalManager = new NativeTerminalManager({
       onData: (agentId, data) => {
         this.webview?.postMessage({ type: 'terminalData', agentId, data });
       },
@@ -119,7 +120,7 @@ export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
         const agent = this.agents.get(agentId);
         if (!agent) return;
 
-        if (!agent.sessionId) {
+        if (this.shouldTreatManagedExitAsLaunchFailure(agent, details.reason)) {
           this.handleAgentLaunchFailure(agentId, details.reason);
           return;
         }
@@ -142,7 +143,9 @@ export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
     return this.webviewView?.webview;
   }
 
-  private get useWindowsNativeTerminalBridge(): boolean {
+  private get useNativeTerminalBridge(): boolean {
+    // The hidden shell-integration bridge is reliable on Windows, but on macOS it can
+    // terminate Codex immediately with exit code 130 before the session is adopted.
     return process.platform === 'win32';
   }
 
@@ -150,33 +153,45 @@ export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
     persistAgents(this.agents, this.context);
   };
 
+  private shouldTreatManagedExitAsLaunchFailure(agent: AgentState, reason: string): boolean {
+    if (agent.sessionId) {
+      return false;
+    }
+
+    if (agent.hookDelivered) {
+      return false;
+    }
+
+    return !reason.startsWith('Session ended');
+  }
+
   private hasManagedTerminalSession(agentId: number): boolean {
-    return this.useWindowsNativeTerminalBridge
-      ? this.windowsNativeTerminalManager.hasSession(agentId)
+    return this.useNativeTerminalBridge
+      ? this.nativeTerminalManager.hasSession(agentId)
       : this.embeddedTerminalManager.hasSession(agentId);
   }
 
   private getManagedTerminalSnapshot(agentId: number): EmbeddedTerminalSnapshot | undefined {
-    return this.useWindowsNativeTerminalBridge
-      ? this.windowsNativeTerminalManager.getSnapshot(agentId)
+    return this.useNativeTerminalBridge
+      ? this.nativeTerminalManager.getSnapshot(agentId)
       : this.embeddedTerminalManager.getSnapshot(agentId);
   }
 
   private sendManagedTerminalInput(agentId: number, data: string): boolean {
-    return this.useWindowsNativeTerminalBridge
-      ? this.windowsNativeTerminalManager.sendInput(agentId, data)
+    return this.useNativeTerminalBridge
+      ? this.nativeTerminalManager.sendInput(agentId, data)
       : this.embeddedTerminalManager.sendInput(agentId, data);
   }
 
   private sendManagedTerminalLine(agentId: number, text: string): boolean {
-    return this.useWindowsNativeTerminalBridge
-      ? this.windowsNativeTerminalManager.sendLine(agentId, text)
+    return this.useNativeTerminalBridge
+      ? this.nativeTerminalManager.sendLine(agentId, text)
       : this.embeddedTerminalManager.sendLine(agentId, text);
   }
 
   private interruptManagedTerminal(agentId: number): boolean {
-    return this.useWindowsNativeTerminalBridge
-      ? this.windowsNativeTerminalManager.interrupt(agentId)
+    return this.useNativeTerminalBridge
+      ? this.nativeTerminalManager.interrupt(agentId)
       : this.embeddedTerminalManager.interrupt(agentId);
   }
 
@@ -185,30 +200,22 @@ export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
     cols: number,
     rows: number,
   ): EmbeddedTerminalSnapshot | undefined {
-    return this.useWindowsNativeTerminalBridge
-      ? this.windowsNativeTerminalManager.resize(agentId, cols, rows)
+    return this.useNativeTerminalBridge
+      ? this.nativeTerminalManager.resize(agentId, cols, rows)
       : this.embeddedTerminalManager.resize(agentId, cols, rows);
   }
 
   private disposeManagedTerminalSession(agentId: number): void {
-    if (this.useWindowsNativeTerminalBridge) {
-      this.windowsNativeTerminalManager.disposeSession(agentId);
+    if (this.useNativeTerminalBridge) {
+      this.nativeTerminalManager.disposeSession(agentId);
       return;
     }
 
     this.embeddedTerminalManager.disposeSession(agentId);
   }
 
-  private isStandardTerminalFallback(agentId: number, agent: AgentState): boolean {
-    return (
-      !this.useWindowsNativeTerminalBridge &&
-      !!agent.terminalRef &&
-      !this.embeddedTerminalManager.hasSession(agentId)
-    );
-  }
-
-  private shouldAutoCreateWindowsMasterSession(): boolean {
-    if (!this.useWindowsNativeTerminalBridge) {
+  private shouldAutoCreateNativeMasterSession(): boolean {
+    if (process.platform !== 'win32') {
       return false;
     }
 
@@ -232,10 +239,7 @@ export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
       this.activeAgentId.current = null;
     }
 
-    const shouldDisposeFallbackTerminal =
-      options?.disposeTerminal && this.isStandardTerminalFallback(agentId, agent);
-
-    if (shouldDisposeFallbackTerminal && agent.terminalRef) {
+    if (options?.disposeTerminal && agent.terminalRef) {
       const terminal = agent.terminalRef;
       agent.terminalRef = undefined;
       try {
@@ -245,7 +249,7 @@ export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
       }
     }
 
-    if (this.useWindowsNativeTerminalBridge && agent.terminalRef) {
+    if (this.useNativeTerminalBridge && agent.terminalRef) {
       agent.terminalRef = undefined;
     }
 
@@ -269,7 +273,7 @@ export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
       this.activeAgentId.current = null;
     }
 
-    if (this.useWindowsNativeTerminalBridge && agent.terminalRef) {
+    if (this.useNativeTerminalBridge && agent.terminalRef) {
       agent.terminalRef = undefined;
     }
 
@@ -286,27 +290,6 @@ export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
     this.webview?.postMessage({ type: 'agentClosed', id: agentId });
     void vscode.window.showErrorMessage(
       `Mission Control: Agent #${agentId} failed to start. ${reason}`,
-    );
-  }
-
-  private updateFallbackTerminalSnapshot(
-    agentId: number,
-    status: EmbeddedTerminalSnapshot['status'],
-  ): void {
-    const currentSnapshot = this.embeddedTerminalManager.getSnapshot(agentId);
-    const reason =
-      status === 'starting'
-        ? 'Embedded terminal control is unavailable in this window. This agent is starting in a standard VS Code terminal instead.'
-        : 'This agent is running in a standard VS Code terminal. Open the terminal panel to interact directly.';
-
-    this.embeddedTerminalManager.setSnapshot(
-      agentId,
-      createInspectOnlyTerminalSnapshot(
-        reason,
-        currentSnapshot?.cols,
-        currentSnapshot?.rows,
-        status,
-      ),
     );
   }
 
@@ -333,18 +316,11 @@ export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
       const snapshot =
         this.getManagedTerminalSnapshot(agent.id) ??
         createInspectOnlyTerminalSnapshot(
-          this.useWindowsNativeTerminalBridge
-            ? 'The hidden Windows terminal bridge is unavailable for this session.'
-            : agent.sessionId
-              ? 'This agent is running in a standard VS Code terminal. Open the terminal panel to interact directly.'
-              : 'Embedded terminal control is unavailable in this window. This agent is starting in a standard VS Code terminal instead.',
+          'The hidden terminal bridge is unavailable for this session.',
           undefined,
           undefined,
-          this.useWindowsNativeTerminalBridge
-            ? 'unavailable'
-            : agent.sessionId
-              ? 'running'
-              : 'starting',
+          'unavailable',
+          'native_terminal',
         );
       this.postTerminalSnapshot(agent.id, snapshot);
       return;
@@ -362,20 +338,9 @@ export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  private launchFallbackAgentRuntime(agent: AgentState, bypassPermissions = false): void {
+  private launchNativeAgentRuntime(agent: AgentState, bypassPermissions = false): void {
     try {
-      launchAgentInTerminal(agent, bypassPermissions);
-      this.updateFallbackTerminalSnapshot(agent.id, 'starting');
-    } catch (error) {
-      const reason =
-        error instanceof Error ? error.message : 'Failed to launch the VS Code terminal runtime.';
-      this.handleAgentLaunchFailure(agent.id, reason);
-    }
-  }
-
-  private launchWindowsNativeAgentRuntime(agent: AgentState, bypassPermissions = false): void {
-    try {
-      const { terminal, snapshot } = this.windowsNativeTerminalManager.launchSession({
+      const { terminal, snapshot } = this.nativeTerminalManager.launchSession({
         agentId: agent.id,
         cwd: agent.cwd ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? os.homedir(),
         name: `${TERMINAL_NAME_PREFIX} #${agent.id}`,
@@ -386,38 +351,24 @@ export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
       this.postTerminalSnapshot(agent.id, snapshot);
     } catch (error) {
       const reason =
-        error instanceof Error ? error.message : 'Failed to launch the hidden Windows terminal.';
+        error instanceof Error ? error.message : 'Failed to launch the hidden terminal bridge.';
       this.handleAgentLaunchFailure(agent.id, reason);
     }
   }
 
   private launchEmbeddedAgentRuntime(agent: AgentState, bypassPermissions = false): void {
-    if (!isEmbeddedTerminalAvailable()) {
-      this.launchFallbackAgentRuntime(agent, bypassPermissions);
-      return;
-    }
-
     const snapshot = this.embeddedTerminalManager.launchSession({
       agentId: agent.id,
       cwd: agent.cwd ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? os.homedir(),
       command: 'codex',
       args: bypassPermissions ? ['--dangerously-bypass-approvals-and-sandbox'] : [],
     });
-
-    if (snapshot.status === 'failed') {
-      console.warn(
-        `[Pixel Agents] Embedded terminal failed for agent ${agent.id}; falling back to VS Code terminal: ${snapshot.reason ?? 'unknown error'}`,
-      );
-      this.launchFallbackAgentRuntime(agent, bypassPermissions);
-      return;
-    }
-
     this.postTerminalSnapshot(agent.id, snapshot);
   }
 
   private launchAgentRuntime(agent: AgentState, bypassPermissions = false): void {
-    if (this.useWindowsNativeTerminalBridge) {
-      this.launchWindowsNativeAgentRuntime(agent, bypassPermissions);
+    if (this.useNativeTerminalBridge) {
+      this.launchNativeAgentRuntime(agent, bypassPermissions);
       return;
     }
 
@@ -480,7 +431,7 @@ export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
 
     if (this.hasManagedTerminalSession(agentId)) {
       this.interruptManagedTerminal(agentId);
-    } else if (this.isStandardTerminalFallback(agentId, agent) && agent.terminalRef) {
+    } else if (agent.terminalRef) {
       agent.terminalRef.show();
       await vscode.commands.executeCommand('workbench.action.terminal.sendSequence', {
         text: '\u0003',
@@ -522,22 +473,10 @@ export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
         if (!agent) return;
         if (agent.isExternal) {
           this.removeManagedAgent(agentId, 'External session ended');
-          return;
-        }
-        if (this.isStandardTerminalFallback(agentId, agent)) {
-          this.removeManagedAgent(agentId, 'Terminal session ended', {
-            disposeTerminal: true,
-          });
         }
       },
       onHookEvent: (agentId, providerId, event, agent) => {
         const trackedAgent = this.agents.get(agentId) ?? agent;
-        if (
-          this.isStandardTerminalFallback(agentId, trackedAgent) &&
-          event.hook_event_name !== 'SessionEnd'
-        ) {
-          this.updateFallbackTerminalSnapshot(agentId, 'running');
-        }
         this.missionControlStore.handleHookEvent(trackedAgent, providerId, event);
       },
     });
@@ -634,11 +573,7 @@ export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
           return;
         }
         const prompt = this.buildTaskDispatchPrompt(task);
-        if (
-          !this.sendManagedTerminalLine(agent.id, prompt) &&
-          this.isStandardTerminalFallback(agent.id, agent) &&
-          agent.terminalRef
-        ) {
+        if (!this.sendManagedTerminalLine(agent.id, prompt) && agent.terminalRef) {
           agent.terminalRef.sendText(prompt, true);
         }
       } else if (message.type === 'assignMissionTask') {
@@ -659,11 +594,7 @@ export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
           return;
         }
         const prompt = this.buildTaskDispatchPrompt(task);
-        if (
-          !this.sendManagedTerminalLine(agent.id, prompt) &&
-          this.isStandardTerminalFallback(agent.id, agent) &&
-          agent.terminalRef
-        ) {
+        if (!this.sendManagedTerminalLine(agent.id, prompt) && agent.terminalRef) {
           agent.terminalRef.sendText(prompt, true);
         }
       } else if (message.type === 'updateMissionTaskStatus') {
@@ -683,7 +614,7 @@ export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
         if (agent) {
           if (this.hasManagedTerminalSession(agent.id)) {
             this.removeManagedAgent(message.id, 'Agent closed from Mission Control');
-          } else if (this.isStandardTerminalFallback(agent.id, agent)) {
+          } else if (agent.terminalRef) {
             this.removeManagedAgent(message.id, 'Agent closed from Mission Control', {
               disposeTerminal: true,
             });
@@ -869,7 +800,7 @@ export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
           type: 'missionControlSnapshot',
           snapshot: this.missionControlStore.getSnapshot(),
         });
-        if (this.shouldAutoCreateWindowsMasterSession()) {
+        if (this.shouldAutoCreateNativeMasterSession()) {
           await this.createAgentSession();
         }
       } else if (message.type === 'requestDiagnostics') {
@@ -1077,7 +1008,7 @@ export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
     this.missionControlUnsubscribe?.();
     this.missionControlUnsubscribe = null;
     this.embeddedTerminalManager.disposeAll();
-    this.windowsNativeTerminalManager.dispose();
+    this.nativeTerminalManager.dispose();
     this.missionControlStore.dispose();
     this.pixelAgentsServer?.stop();
     this.pixelAgentsServer = null;
