@@ -95,7 +95,7 @@ export async function launchNewTerminal(
 
   agents.set(id, agent);
   persistAgents();
-  console.log(`[Pixel Agents] Session: Agent ${id} - created for embedded runtime`);
+  console.log(`[Pixel Agents] Session: Agent ${id} - created for managed runtime`);
   webview?.postMessage({ type: 'agentCreated', id, folderName });
 }
 

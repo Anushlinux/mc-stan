@@ -74,7 +74,7 @@ function getProgressLabel(
   terminal: EmbeddedTerminalState | undefined,
 ): string {
   if (session) return getSessionProgressLabel(session, task);
-  if (!terminal) return 'Waiting for the embedded terminal to attach.';
+  if (!terminal) return 'Waiting for the terminal to attach.';
   if (terminal.status === 'starting') return 'Booting the Codex session inside the canvas sidebar.';
   if (terminal.status === 'running') return 'Terminal connected. Waiting for session metadata.';
   return terminal.reason ?? 'Interactive terminal unavailable.';

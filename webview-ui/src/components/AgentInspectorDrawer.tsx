@@ -91,12 +91,12 @@ function getLaunchTone(
 }
 
 function getBootstrapProgressLabel(terminal: EmbeddedTerminalState | undefined): string {
-  if (!terminal) return 'Waiting for the embedded terminal to attach.';
+  if (!terminal) return 'Waiting for the terminal to attach.';
   if (terminal.status === 'starting') return 'Booting the Codex session inside the canvas sidebar.';
   if (terminal.status === 'running') return 'Terminal connected. Waiting for session metadata.';
   if (terminal.status === 'failed')
-    return terminal.reason ?? 'The embedded session failed to start.';
-  if (terminal.status === 'exited') return terminal.reason ?? 'The embedded session ended.';
+    return terminal.reason ?? 'The terminal session failed to start.';
+  if (terminal.status === 'exited') return terminal.reason ?? 'The terminal session ended.';
   return terminal.reason ?? 'Interactive terminal unavailable.';
 }
 
