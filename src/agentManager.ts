@@ -3,7 +3,11 @@ import * as os from 'os';
 import * as path from 'path';
 import * as vscode from 'vscode';
 
-import { WORKSPACE_KEY_AGENT_SEATS, WORKSPACE_KEY_AGENTS } from './constants.js';
+import {
+  TERMINAL_NAME_PREFIX,
+  WORKSPACE_KEY_AGENT_SEATS,
+  WORKSPACE_KEY_AGENTS,
+} from './constants.js';
 import { migrateAndLoadLayout } from './layoutPersistence.js';
 import { safeUpdateState } from './stateUtils.js';
 import { cancelPermissionTimer, cancelWaitingTimer } from './timerManager.js';
@@ -32,6 +36,25 @@ export function getProjectDirPath(cwd?: string): string {
     }
   }
   return projectDir;
+}
+
+function buildCodexLaunchCommand(bypassPermissions = false): string {
+  return bypassPermissions ? 'codex --dangerously-bypass-approvals-and-sandbox' : 'codex';
+}
+
+export function launchAgentInTerminal(
+  agent: AgentState,
+  bypassPermissions = false,
+): vscode.Terminal {
+  const terminal = vscode.window.createTerminal({
+    name: `${TERMINAL_NAME_PREFIX} #${agent.id}`,
+    cwd: agent.cwd,
+  });
+  agent.terminalRef = terminal;
+  terminal.show(true);
+  terminal.sendText(buildCodexLaunchCommand(bypassPermissions), true);
+  console.log(`[Pixel Agents] Session: Agent ${agent.id} - launched in VS Code terminal`);
+  return terminal;
 }
 
 export async function launchNewTerminal(

@@ -121,16 +121,21 @@ export function createInspectOnlyTerminalSnapshot(
   reason: string,
   cols = DEFAULT_COLS,
   rows = DEFAULT_ROWS,
+  status: EmbeddedTerminalSnapshot['status'] = 'unavailable',
 ): EmbeddedTerminalSnapshot {
   return {
     mode: 'inspect_only',
-    status: 'unavailable',
+    status,
     canInteract: false,
     buffer: '',
     cols,
     rows,
     reason,
   };
+}
+
+export function isEmbeddedTerminalAvailable(): boolean {
+  return loadNodePty() !== null;
 }
 
 export class EmbeddedTerminalManager {
@@ -155,13 +160,10 @@ export class EmbeddedTerminalManager {
         cols,
         rows,
         reason:
-          'Embedded terminal requires the optional "node-pty" dependency, which is not installed.',
+          'Embedded terminal is unavailable because this VS Code extension runs on Node/Electron and the optional "node-pty" package is not installed. Install it in the repo root with `npm install node-pty --save-optional`, then reload the extension. Until then, the rest of Pixel Agents will continue to work without embedded terminal control.',
       };
       this.snapshots.set(options.agentId, snapshot);
       this.callbacks.onSnapshot(options.agentId, snapshot);
-      this.callbacks.onExit(options.agentId, {
-        reason: snapshot.reason ?? 'Embedded terminal is unavailable.',
-      });
       return snapshot;
     }
 
@@ -193,9 +195,6 @@ export class EmbeddedTerminalManager {
       };
       this.snapshots.set(options.agentId, snapshot);
       this.callbacks.onSnapshot(options.agentId, snapshot);
-      this.callbacks.onExit(options.agentId, {
-        reason: snapshot.reason ?? 'Failed to launch Codex',
-      });
       return snapshot;
     }
 

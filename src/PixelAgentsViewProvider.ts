@@ -15,6 +15,7 @@ import type { EmbeddedTerminalSnapshot } from '../shared/embeddedTerminal.js';
 import type { MissionControlTask } from '../shared/missionControl.js';
 import {
   getProjectDirPath,
+  launchAgentInTerminal,
   launchNewTerminal,
   persistAgents,
   removeAgent,
@@ -52,6 +53,7 @@ import {
 import {
   createInspectOnlyTerminalSnapshot,
   EmbeddedTerminalManager,
+  isEmbeddedTerminalAvailable,
 } from './embeddedTerminalManager.js';
 import type { LayoutWatcher } from './layoutPersistence.js';
 import { readLayoutFromFile, watchLayoutFile, writeLayoutToFile } from './layoutPersistence.js';
@@ -96,24 +98,11 @@ export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
         if (!agent) return;
 
         if (!agent.sessionId) {
-          this.missionControlStore.recordAgentLaunchFailure(agent, details.reason);
-          void vscode.window.showErrorMessage(
-            `Mission Control: Agent #${agentId} failed to start. ${details.reason}`,
-          );
+          this.handleAgentLaunchFailure(agentId, details.reason);
           return;
         }
 
-        this.embeddedTerminalManager.disposeSession(agentId);
-        this.missionControlStore.recordAgentRemoved(agent, details.reason);
-        this.unregisterAgentHook(agent);
-        removeAgent(
-          agentId,
-          this.agents,
-          this.waitingTimers,
-          this.permissionTimers,
-          this.persistAgents,
-        );
-        this.webview?.postMessage({ type: 'agentClosed', id: agentId });
+        this.removeManagedAgent(agentId, details.reason);
       },
     });
     this.missionControlStore = new MissionControlStore(context);
@@ -135,6 +124,84 @@ export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
     persistAgents(this.agents, this.context);
   };
 
+  private removeManagedAgent(
+    agentId: number,
+    reason: string,
+    options?: { disposeTerminal?: boolean },
+  ): void {
+    const agent = this.agents.get(agentId);
+    if (!agent) return;
+    if (this.activeAgentId.current === agentId) {
+      this.activeAgentId.current = null;
+    }
+
+    if (options?.disposeTerminal && agent.terminalRef) {
+      const terminal = agent.terminalRef;
+      agent.terminalRef = undefined;
+      try {
+        terminal.dispose();
+      } catch {
+        // Ignore terminal teardown errors during cleanup.
+      }
+    }
+
+    this.embeddedTerminalManager.disposeSession(agentId);
+    this.missionControlStore.recordAgentRemoved(agent, reason);
+    this.unregisterAgentHook(agent);
+    removeAgent(
+      agentId,
+      this.agents,
+      this.waitingTimers,
+      this.permissionTimers,
+      this.persistAgents,
+    );
+    this.webview?.postMessage({ type: 'agentClosed', id: agentId });
+  }
+
+  private handleAgentLaunchFailure(agentId: number, reason: string): void {
+    const agent = this.agents.get(agentId);
+    if (!agent) return;
+    if (this.activeAgentId.current === agentId) {
+      this.activeAgentId.current = null;
+    }
+
+    this.embeddedTerminalManager.disposeSession(agentId);
+    this.unregisterAgentHook(agent);
+    this.missionControlStore.recordAgentLaunchFailure(agent, reason);
+    removeAgent(
+      agentId,
+      this.agents,
+      this.waitingTimers,
+      this.permissionTimers,
+      this.persistAgents,
+    );
+    this.webview?.postMessage({ type: 'agentClosed', id: agentId });
+    void vscode.window.showErrorMessage(
+      `Mission Control: Agent #${agentId} failed to start. ${reason}`,
+    );
+  }
+
+  private updateFallbackTerminalSnapshot(
+    agentId: number,
+    status: EmbeddedTerminalSnapshot['status'],
+  ): void {
+    const currentSnapshot = this.embeddedTerminalManager.getSnapshot(agentId);
+    const reason =
+      status === 'starting'
+        ? 'Embedded terminal control is unavailable in this window. This agent is starting in a standard VS Code terminal instead.'
+        : 'This agent is running in a standard VS Code terminal. Open the terminal panel to interact directly.';
+
+    this.embeddedTerminalManager.setSnapshot(
+      agentId,
+      createInspectOnlyTerminalSnapshot(
+        reason,
+        currentSnapshot?.cols,
+        currentSnapshot?.rows,
+        status,
+      ),
+    );
+  }
+
   private postTerminalSnapshot(agentId: number, snapshot: EmbeddedTerminalSnapshot): void {
     this.webview?.postMessage({
       type: 'terminalSnapshot',
@@ -154,6 +221,21 @@ export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
       return;
     }
 
+    if (agent.terminalRef) {
+      const snapshot =
+        this.embeddedTerminalManager.getSnapshot(agent.id) ??
+        createInspectOnlyTerminalSnapshot(
+          agent.sessionId
+            ? 'This agent is running in a standard VS Code terminal. Open the terminal panel to interact directly.'
+            : 'Embedded terminal control is unavailable in this window. This agent is starting in a standard VS Code terminal instead.',
+          undefined,
+          undefined,
+          agent.sessionId ? 'running' : 'starting',
+        );
+      this.postTerminalSnapshot(agent.id, snapshot);
+      return;
+    }
+
     const snapshot =
       this.embeddedTerminalManager.getSnapshot(agent.id) ??
       createInspectOnlyTerminalSnapshot('Embedded terminal is unavailable for this session.');
@@ -166,13 +248,38 @@ export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
+  private launchFallbackAgentRuntime(agent: AgentState, bypassPermissions = false): void {
+    try {
+      launchAgentInTerminal(agent, bypassPermissions);
+      this.updateFallbackTerminalSnapshot(agent.id, 'starting');
+    } catch (error) {
+      const reason =
+        error instanceof Error ? error.message : 'Failed to launch the VS Code terminal runtime.';
+      this.handleAgentLaunchFailure(agent.id, reason);
+    }
+  }
+
   private launchEmbeddedAgentRuntime(agent: AgentState, bypassPermissions = false): void {
+    if (!isEmbeddedTerminalAvailable()) {
+      this.launchFallbackAgentRuntime(agent, bypassPermissions);
+      return;
+    }
+
     const snapshot = this.embeddedTerminalManager.launchSession({
       agentId: agent.id,
       cwd: agent.cwd ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? os.homedir(),
       command: 'codex',
       args: bypassPermissions ? ['--dangerously-bypass-approvals-and-sandbox'] : [],
     });
+
+    if (snapshot.status === 'failed') {
+      console.warn(
+        `[Pixel Agents] Embedded terminal failed for agent ${agent.id}; falling back to VS Code terminal: ${snapshot.reason ?? 'unknown error'}`,
+      );
+      this.launchFallbackAgentRuntime(agent, bypassPermissions);
+      return;
+    }
+
     this.postTerminalSnapshot(agent.id, snapshot);
   }
 
@@ -248,20 +355,24 @@ export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
         const agent = this.agents.get(agentId);
         if (!agent) return;
         if (agent.isExternal) {
-          this.missionControlStore.recordAgentRemoved(agent, 'External session ended');
-          this.unregisterAgentHook(agent);
-          removeAgent(
-            agentId,
-            this.agents,
-            this.waitingTimers,
-            this.permissionTimers,
-            this.persistAgents,
-          );
-          this.webview?.postMessage({ type: 'agentClosed', id: agentId });
+          this.removeManagedAgent(agentId, 'External session ended');
+          return;
+        }
+        if (agent.terminalRef && !this.embeddedTerminalManager.hasSession(agentId)) {
+          this.removeManagedAgent(agentId, 'Terminal session ended', {
+            disposeTerminal: true,
+          });
         }
       },
       onHookEvent: (agentId, providerId, event, agent) => {
         const trackedAgent = this.agents.get(agentId) ?? agent;
+        if (
+          trackedAgent.terminalRef &&
+          !this.embeddedTerminalManager.hasSession(agentId) &&
+          event.hook_event_name !== 'SessionEnd'
+        ) {
+          this.updateFallbackTerminalSnapshot(agentId, 'running');
+        }
         this.missionControlStore.handleHookEvent(trackedAgent, providerId, event);
       },
     });
@@ -413,30 +524,13 @@ export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
         const agent = this.agents.get(message.id);
         if (agent) {
           if (this.embeddedTerminalManager.hasSession(agent.id)) {
-            this.embeddedTerminalManager.disposeSession(agent.id);
-            this.unregisterAgentHook(agent);
-            this.missionControlStore.recordAgentRemoved(agent, 'Agent closed from Mission Control');
-            removeAgent(
-              message.id,
-              this.agents,
-              this.waitingTimers,
-              this.permissionTimers,
-              this.persistAgents,
-            );
-            webviewView.webview.postMessage({ type: 'agentClosed', id: message.id });
+            this.removeManagedAgent(message.id, 'Agent closed from Mission Control');
           } else if (agent.terminalRef) {
-            agent.terminalRef.dispose();
+            this.removeManagedAgent(message.id, 'Agent closed from Mission Control', {
+              disposeTerminal: true,
+            });
           } else {
-            this.embeddedTerminalManager.disposeSession(agent.id);
-            this.missionControlStore.recordAgentRemoved(agent, 'Agent closed from Mission Control');
-            removeAgent(
-              message.id,
-              this.agents,
-              this.waitingTimers,
-              this.permissionTimers,
-              this.persistAgents,
-            );
-            webviewView.webview.postMessage({ type: 'agentClosed', id: message.id });
+            this.removeManagedAgent(message.id, 'Agent closed from Mission Control');
           }
         }
       } else if (message.type === 'saveAgentSeats') {
@@ -719,16 +813,7 @@ export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
           if (this.activeAgentId.current === id) {
             this.activeAgentId.current = null;
           }
-          this.missionControlStore.recordAgentRemoved(agent, 'Terminal closed');
-          this.unregisterAgentHook(agent);
-          removeAgent(
-            id,
-            this.agents,
-            this.waitingTimers,
-            this.permissionTimers,
-            this.persistAgents,
-          );
-          webviewView.webview.postMessage({ type: 'agentClosed', id });
+          this.removeManagedAgent(id, 'Terminal closed');
         }
       }
     });
