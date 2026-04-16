@@ -1,5 +1,3 @@
-import * as nodePty from 'node-pty';
-
 import type { EmbeddedTerminalSnapshot } from '../shared/embeddedTerminal.js';
 
 const DEFAULT_COLS = 120;
@@ -7,7 +5,7 @@ const DEFAULT_ROWS = 32;
 const MAX_BUFFER_CHARS = 200_000;
 
 interface EmbeddedSessionState {
-  pty: nodePty.IPty;
+  pty: PtyProcess;
   buffer: string;
   status: EmbeddedTerminalSnapshot['status'];
   cols: number;
@@ -38,6 +36,50 @@ interface EmbeddedTerminalManagerCallbacks {
       reason: string;
     },
   ) => void;
+}
+
+interface PtyExitEvent {
+  exitCode: number;
+  signal?: number;
+}
+
+interface PtyProcess {
+  write(data: string): void;
+  resize(cols: number, rows: number): void;
+  kill(signal?: string): void;
+  onData(listener: (data: string) => void): void;
+  onExit(listener: (event: PtyExitEvent) => void): void;
+}
+
+interface PtyModule {
+  spawn(
+    file: string,
+    args?: string[],
+    options?: {
+      name?: string;
+      cols?: number;
+      rows?: number;
+      cwd?: string;
+      env?: NodeJS.ProcessEnv;
+    },
+  ): PtyProcess;
+}
+
+let cachedNodePty: PtyModule | null | undefined;
+
+function loadNodePty(): PtyModule | null {
+  if (cachedNodePty !== undefined) {
+    return cachedNodePty;
+  }
+
+  try {
+    const runtimeRequire = eval('require') as NodeRequire;
+    cachedNodePty = runtimeRequire('node-pty') as PtyModule;
+  } catch {
+    cachedNodePty = null;
+  }
+
+  return cachedNodePty;
 }
 
 function trimBuffer(buffer: string): { buffer: string; truncated: boolean } {
@@ -103,7 +145,27 @@ export class EmbeddedTerminalManager {
     const cols = options.cols ?? DEFAULT_COLS;
     const rows = options.rows ?? DEFAULT_ROWS;
 
-    let pty: nodePty.IPty;
+    const nodePty = loadNodePty();
+    if (!nodePty) {
+      const snapshot: EmbeddedTerminalSnapshot = {
+        mode: 'embedded',
+        status: 'failed',
+        canInteract: false,
+        buffer: '',
+        cols,
+        rows,
+        reason:
+          'Embedded terminal requires the optional "node-pty" dependency, which is not installed.',
+      };
+      this.snapshots.set(options.agentId, snapshot);
+      this.callbacks.onSnapshot(options.agentId, snapshot);
+      this.callbacks.onExit(options.agentId, {
+        reason: snapshot.reason ?? 'Embedded terminal is unavailable.',
+      });
+      return snapshot;
+    }
+
+    let pty: PtyProcess;
     try {
       pty = nodePty.spawn(options.command, options.args ?? [], {
         name: 'xterm-256color',
@@ -149,7 +211,7 @@ export class EmbeddedTerminalManager {
     this.liveSessions.set(options.agentId, state);
     this.emitSnapshot(options.agentId, state);
 
-    pty.onData((data) => {
+    pty.onData((data: string) => {
       if (!data) return;
 
       state.status = 'running';
@@ -166,7 +228,7 @@ export class EmbeddedTerminalManager {
       this.callbacks.onData(options.agentId, data);
     });
 
-    pty.onExit(({ exitCode, signal }) => {
+    pty.onExit(({ exitCode, signal }: { exitCode: number; signal?: number }) => {
       const session = this.liveSessions.get(options.agentId);
       if (!session) return;
 
